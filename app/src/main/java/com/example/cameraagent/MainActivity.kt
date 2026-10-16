@@ -43,6 +43,13 @@ import kotlin.math.roundToInt
 import org.json.JSONArray
 import org.json.JSONObject
 
+private data class AgentApplySnapshot(
+    val exposureIndex: Int,
+    val zoomRatio: Float?,
+    val colorStyle: ColorStyle,
+    val manualColorOverride: Boolean,
+)
+
 class MainActivity : ComponentActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var compositionOverlay: CompositionOverlayView
@@ -69,7 +76,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var requestPreviewText: TextView
     private lateinit var cloudAdviceText: TextView
     private lateinit var sendCloudRequestButton: Button
-    private lateinit var applyCloudAdviceButton: Button
+    private lateinit var undoCloudAdviceButton: Button
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var analysisExecutor: ExecutorService
     private lateinit var photoProcessingExecutor: ExecutorService
@@ -91,9 +98,11 @@ class MainActivity : ComponentActivity() {
     private var guideEnabled = true
     private var zoomSeekBarUpdating = false
     private var cloudRequestInFlight = false
+    private var cloudAdviceApplying = false
     private var latestCloudAdvice: CameraAdvice? = null
     private var latestCloudAdviceAtMs = 0L
     private var latestCloudAdviceSceneName: String? = null
+    private var latestAgentApplySnapshot: AgentApplySnapshot? = null
 
     private val requestCameraPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -345,13 +354,7 @@ class MainActivity : ComponentActivity() {
                 setPadding(dp(12), dp(12), dp(12), dp(12))
             }
             addView(icon, android.widget.FrameLayout.LayoutParams(-1, -1))
-            setOnClickListener {
-                if (latestCloudAdvice != null) {
-                    confirmApplyCloudAdvice()
-                } else {
-                    sendCloudRequest()
-                }
-            }
+            setOnClickListener { sendCloudRequest() }
         }
         bottomBar.addView(agentCircleButton, LinearLayout.LayoutParams(dp(60), dp(60)).apply {
             leftMargin = dp(28)
@@ -484,14 +487,14 @@ class MainActivity : ComponentActivity() {
             setTextIsSelectable(true)
         }
         content.addView(cloudAdviceText, matchWidthWrapHeight())
-        applyCloudAdviceButton = Button(this).apply {
-            text = "审阅并应用建议"
+        undoCloudAdviceButton = Button(this).apply {
+            text = "撤销上次 AI 调整"
             setTextColor(Color.WHITE)
             visibility = View.GONE
             setBackgroundResource(R.drawable.bg_glass_button)
-            setOnClickListener { confirmApplyCloudAdvice() }
+            setOnClickListener { undoLastCloudAdvice() }
         }
-        content.addView(applyCloudAdviceButton, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(8) })
+        content.addView(undoCloudAdviceButton, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(8) })
 
         content.addView(settingLabel("请求预览"))
         requestPreviewText = TextView(this).apply {
@@ -734,7 +737,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendCloudRequest() {
-        if (cloudRequestInFlight) return
+        if (cloudRequestInFlight || cloudAdviceApplying) return
         val config = readAgentConfig() ?: return
         val typedApiKey = if (::apiKeyEditText.isInitialized) apiKeyEditText.text.toString() else ""
         val apiKey = typedApiKey.ifBlank { agentConfigStore.loadApiKey().orEmpty() }
@@ -758,7 +761,6 @@ class MainActivity : ComponentActivity() {
         updateRequestPreview(config, buildAgentRequestBody(config, includeImagePlaceholder = true))
         latestCloudAdvice = null
         val requestSceneName = latestAssessment?.sceneName
-        if (::applyCloudAdviceButton.isInitialized) applyCloudAdviceButton.visibility = View.GONE
         if (::cloudAdviceText.isInitialized) cloudAdviceText.text = "正在采集一张当前取景帧，然后请求云端建议…"
         cloudRequestInFlight = true
         if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = false
@@ -778,17 +780,14 @@ class MainActivity : ComponentActivity() {
                             latestCloudAdvice = advice
                             latestCloudAdviceAtMs = SystemClock.elapsedRealtime()
                             latestCloudAdviceSceneName = requestSceneName
-                            if (::cloudAdviceText.isInitialized) cloudAdviceText.text = formatCloudAdvice(advice)
-                            if (::applyCloudAdviceButton.isInitialized) applyCloudAdviceButton.visibility = View.VISIBLE
-                            if (::credentialStatusText.isInitialized) credentialStatusText.text = "已收到建议；参数不会自动应用"
-                            confirmApplyCloudAdvice()
+                            applyCloudAdvice(advice)
+                            latestCloudAdvice = null
                         }
                     } catch (error: Exception) {
                         runOnUiThread {
                             cloudRequestInFlight = false
                             if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
                             if (::cloudAdviceText.isInitialized) cloudAdviceText.text = "未能获取建议：${error.message ?: "网络或响应错误"}"
-                            if (::applyCloudAdviceButton.isInitialized) applyCloudAdviceButton.visibility = View.GONE
                             showStatus("请求失败：${error.message ?: "网络或响应错误"}")
                         }
                     } finally {
@@ -802,7 +801,6 @@ class MainActivity : ComponentActivity() {
                     cloudRequestInFlight = false
                     if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
                     if (::cloudAdviceText.isInitialized) cloudAdviceText.text = "未能采集当前取景帧：${exception.message ?: "相机拍摄错误"}"
-                    if (::applyCloudAdviceButton.isInitialized) applyCloudAdviceButton.visibility = View.GONE
                     showStatus("没有发送网络请求；相机拍摄错误")
                 }
             }
@@ -836,89 +834,198 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun confirmApplyCloudAdvice() {
-        val advice = latestCloudAdvice ?: return
-        if (isCloudAdviceStale()) {
-            latestCloudAdvice = null
-            applyCloudAdviceButton.visibility = View.GONE
-            cloudAdviceText.append("\n\n场景已变化或建议已过期，请重新请求。")
-            return
-        }
-        android.app.AlertDialog.Builder(this)
-            .setTitle("应用云端拍摄建议？")
-            .setMessage(formatCloudAdvice(advice))
-            .setPositiveButton("应用支持的参数") { _, _ -> applyCloudAdvice(advice) }
-            .setNegativeButton("暂不应用", null)
-            .show()
-    }
-
     private fun isCloudAdviceStale(): Boolean =
         SystemClock.elapsedRealtime() - latestCloudAdviceAtMs > CLOUD_ADVICE_TTL_MS ||
             latestAssessment?.sceneName != latestCloudAdviceSceneName
 
     private fun applyCloudAdvice(advice: CameraAdvice) {
+        if (isCloudAdviceStale()) {
+            cloudAdviceText.text = formatCloudAdvice(advice) + "\n\n场景已变化或建议已过期，没有应用参数；请重新请求。"
+            showAgentConfigStatus("云端建议已过期，没有应用参数")
+            return
+        }
         val activeCamera = camera ?: run {
             showAgentConfigStatus("相机尚未就绪，建议没有应用")
             return
         }
+        val exposureState = activeCamera.cameraInfo.exposureState
+        val zoomState = activeCamera.cameraInfo.zoomState.value
+        val snapshot = AgentApplySnapshot(
+            exposureIndex = exposureState.exposureCompensationIndex,
+            zoomRatio = zoomState?.zoomRatio,
+            colorStyle = selectedColorStyle,
+            manualColorOverride = manualColorOverride,
+        )
+        val outcomes = mutableListOf<String>()
+        var pendingActions = advice.actions.size
         var appliedCount = 0
         var skippedCount = 0
+        var failedCount = 0
+        var compositionHintCount = 0
+        latestAgentApplySnapshot = snapshot
+        undoCloudAdviceButton.visibility = View.VISIBLE
+        undoCloudAdviceButton.isEnabled = false
+        cloudAdviceText.text = formatCloudAdvice(advice) + "\n\n正在应用建议…"
+        if (pendingActions == 0) {
+            undoCloudAdviceButton.visibility = View.GONE
+            latestAgentApplySnapshot = null
+            cloudAdviceText.append("\n没有可应用的参数建议。")
+            showAgentConfigStatus("云端没有返回可应用的参数")
+            return
+        }
+        cloudAdviceApplying = true
+        if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = false
+        fun recordOutcome(message: String, applied: Boolean, failed: Boolean = false, skipped: Boolean = false) {
+            outcomes += message
+            if (applied) appliedCount++
+            if (failed) failedCount++
+            if (skipped) skippedCount++
+            pendingActions--
+            if (pendingActions == 0) {
+                cloudAdviceApplying = false
+                if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
+                undoCloudAdviceButton.isEnabled = appliedCount > 0
+                if (appliedCount == 0) {
+                    undoCloudAdviceButton.visibility = View.GONE
+                    latestAgentApplySnapshot = null
+                }
+                val summary = "执行结果：已应用 $appliedCount 项，跳过 $skippedCount 项，失败 $failedCount 项；构图提示 $compositionHintCount 条。"
+                cloudAdviceText.text = formatCloudAdvice(advice) + "\n\n" + summary + outcomes.joinToString(separator = "\n• ", prefix = "\n• ")
+                if (::credentialStatusText.isInitialized) credentialStatusText.text = summary
+                showAgentConfigStatus(summary)
+            }
+        }
         advice.actions.forEach { action ->
             when (action.kind) {
                 "exposure_ev" -> {
                     val state = activeCamera.cameraInfo.exposureState
                     val step = state.exposureCompensationStep.toFloat()
-                    val targetEv = action.numberValue ?: 0.0
+                    val range = state.exposureCompensationRange
                     if (autoModeEnabled || !state.isExposureCompensationSupported || step <= 0f) {
-                        skippedCount++
+                        recordOutcome("曝光补偿：自动模式启用或设备不支持", applied = false, skipped = true)
                     } else {
-                        val targetIndex = (targetEv / step).roundToInt().coerceIn(
-                            state.exposureCompensationRange.lower,
-                            state.exposureCompensationRange.upper,
+                        val minEv = range.lower * step
+                        val maxEv = range.upper * step
+                        val currentEv = state.exposureCompensationIndex * step
+                        val requestedEv = action.numberValue?.toFloat() ?: currentEv
+                        val targetEv = requestedEv.coerceIn(
+                            maxOf(minEv, currentEv - MAX_CLOUD_EXPOSURE_DELTA_EV),
+                            minOf(maxEv, currentEv + MAX_CLOUD_EXPOSURE_DELTA_EV),
                         )
+                        val targetIndex = (targetEv / step).roundToInt().coerceIn(range.lower, range.upper)
                         val future = activeCamera.cameraControl.setExposureCompensationIndex(targetIndex)
                         future.addListener({
                             runCatching { future.get() }
-                                .onSuccess { updateExposureLabel() }
-                                .onFailure { showAgentConfigStatus("设备未接受曝光建议") }
+                                .onSuccess {
+                                    updateExposureLabel()
+                                    recordOutcome("曝光补偿：${targetIndex * step} EV", applied = true)
+                                }
+                                .onFailure {
+                                    recordOutcome("曝光补偿：设备未接受建议", applied = false, failed = true)
+                                }
                         }, ContextCompat.getMainExecutor(this))
-                        appliedCount++
                     }
                 }
                 "zoom_ratio" -> {
                     val state = activeCamera.cameraInfo.zoomState.value
                     if (state == null || state.maxZoomRatio <= state.minZoomRatio) {
-                        skippedCount++
+                        recordOutcome("变焦：设备不支持", applied = false, skipped = true)
                     } else {
-                        val target = (action.numberValue ?: state.zoomRatio.toDouble())
-                            .toFloat().coerceIn(state.minZoomRatio, state.maxZoomRatio)
+                        val requested = action.numberValue?.toFloat() ?: state.zoomRatio
+                        val target = requested.coerceIn(
+                            maxOf(state.minZoomRatio, state.zoomRatio / MAX_CLOUD_ZOOM_FACTOR),
+                            minOf(state.maxZoomRatio, state.zoomRatio * MAX_CLOUD_ZOOM_FACTOR),
+                        )
                         val future = activeCamera.cameraControl.setZoomRatio(target)
                         future.addListener({
                             runCatching { future.get() }
-                                .onFailure { showAgentConfigStatus("设备未接受变焦建议") }
+                                .onSuccess { recordOutcome("变焦：${"%.2f".format(Locale.US, target)}×", applied = true) }
+                                .onFailure { recordOutcome("变焦：设备未接受建议", applied = false, failed = true) }
                         }, ContextCompat.getMainExecutor(this))
-                        appliedCount++
                     }
                 }
                 "color_style" -> {
                     if (autoModeEnabled) {
-                        skippedCount++
+                        recordOutcome("影调：自动影调模式启用", applied = false, skipped = true)
                     } else {
                         selectedColorStyle = ColorStyle.valueOf(action.textValue!!)
                         manualColorOverride = true
                         updateColorStyleButton()
                         latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
-                        appliedCount++
+                        recordOutcome("影调：${selectedColorStyle.displayName}", applied = true)
                     }
                 }
                 "composition" -> {
-                    showStatus("构图建议：${action.textValue}")
-                    appliedCount++
+                    compositionHintCount++
+                    recordOutcome("构图建议：${action.textValue}", applied = false)
                 }
             }
         }
-        val result = "已提交 $appliedCount 项建议；${skippedCount} 项因设备能力不足跳过。"
-        showAgentConfigStatus(result)
+    }
+
+    private fun undoLastCloudAdvice() {
+        val snapshot = latestAgentApplySnapshot ?: return
+        val activeCamera = camera ?: run {
+            showAgentConfigStatus("相机尚未就绪，无法撤销")
+            return
+        }
+        undoCloudAdviceButton.isEnabled = false
+        cloudAdviceApplying = true
+        if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = false
+        var pendingRestores = 0
+        var failedRestores = 0
+        var restoreSchedulingComplete = false
+        fun finishIfReady() {
+            if (!restoreSchedulingComplete || pendingRestores != 0) return
+            if (failedRestores == 0) {
+                latestAgentApplySnapshot = null
+                undoCloudAdviceButton.visibility = View.GONE
+                cloudAdviceApplying = false
+                if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
+                showAgentConfigStatus("已撤销上次 AI 调整")
+            } else {
+                cloudAdviceApplying = false
+                if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
+                undoCloudAdviceButton.isEnabled = true
+                showAgentConfigStatus("撤销未完全成功；可重试，失败 $failedRestores 项")
+            }
+        }
+        fun finishOneRestore(success: Boolean) {
+            if (!success) failedRestores++
+            pendingRestores--
+            finishIfReady()
+        }
+        val exposureState = activeCamera.cameraInfo.exposureState
+        if (exposureState.isExposureCompensationSupported) {
+            val target = snapshot.exposureIndex.coerceIn(
+                exposureState.exposureCompensationRange.lower,
+                exposureState.exposureCompensationRange.upper,
+            )
+            val future = activeCamera.cameraControl.setExposureCompensationIndex(target)
+            pendingRestores++
+            future.addListener({
+                val success = runCatching { future.get() }.isSuccess
+                if (success) updateExposureLabel()
+                finishOneRestore(success)
+            }, ContextCompat.getMainExecutor(this))
+        }
+        snapshot.zoomRatio?.let { target ->
+            val zoomState = activeCamera.cameraInfo.zoomState.value
+            if (zoomState != null && zoomState.maxZoomRatio > zoomState.minZoomRatio) {
+                val future = activeCamera.cameraControl.setZoomRatio(target.coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio))
+                pendingRestores++
+                future.addListener({
+                    finishOneRestore(runCatching { future.get() }.isSuccess)
+                }, ContextCompat.getMainExecutor(this))
+            }
+        }
+        selectedColorStyle = snapshot.colorStyle
+        manualColorOverride = snapshot.manualColorOverride
+        updateColorStyleButton()
+        latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
+        restoreSchedulingComplete = true
+        if (pendingRestores > 0) showAgentConfigStatus("正在撤销上次 AI 调整…")
+        finishIfReady()
     }
 
     private fun startCamera() {
@@ -1006,7 +1113,6 @@ class MainActivity : ComponentActivity() {
         latestAssessment = assessment
         if (latestCloudAdvice != null && assessment.sceneName != latestCloudAdviceSceneName) {
             latestCloudAdvice = null
-            if (::applyCloudAdviceButton.isInitialized) applyCloudAdviceButton.visibility = View.GONE
             if (::cloudAdviceText.isInitialized) cloudAdviceText.append("\n\n场景已变化，请重新获取建议。")
         }
         recommendedColorStyle = assessment.recommendedColorStyle
@@ -1331,5 +1437,7 @@ class MainActivity : ComponentActivity() {
         const val FOCUS_UPDATE_THRESHOLD = 0.06f
         const val FOCUS_AUTO_CANCEL_SECONDS = 3L
         const val CLOUD_ADVICE_TTL_MS = 30_000L
+        const val MAX_CLOUD_EXPOSURE_DELTA_EV = 1.0f
+        const val MAX_CLOUD_ZOOM_FACTOR = 1.5f
     }
 }
