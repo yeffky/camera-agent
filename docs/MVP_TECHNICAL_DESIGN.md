@@ -143,6 +143,13 @@ CameraX Preview / ImageCapture / ImageAnalysis
 - AI 裁剪使用原始分辨率 ImageCapture JPEG 的 EXIF 坐标映射，并只保存裁剪输出；裁剪失败时删除未裁剪临时照片并退回普通相机。
 - 云端响应、PreviewView 和不同厂商照片方向/比例仍需用真实服务和设备验证；详细契约见 [OpenSpec：ai-framing-capture](../openspec/changes/ai-framing-capture/proposal.md)。
 
+### 阶段 I：拍后轻量预设微调（实现完成；产品验收待做）
+
+- 拍摄结果预览增加 0–100 预设强度滑杆；预览从当前拍摄源重新处理，不重复叠加 JPEG 压缩。
+- 拖动期间合并快速更新，处理未完成时禁用保存；重拍或关闭预览不改变预设默认强度。
+- 只有照片成功保存后才持久化这次强度；AI 裁剪流程只处理裁剪后的源图，结果页不提供全幅图。
+- 规格见 [OpenSpec：post-capture-light-edit](../openspec/changes/post-capture-light-edit/proposal.md)。
+
 ## 7. 验收标准
 
 - 无 root，使用公开 Android 相机 API。

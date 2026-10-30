@@ -2042,10 +2042,14 @@ class MainActivity : ComponentActivity() {
             val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 }
             return android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
         }
-        val processedBitmap = previewBitmap(processedFile)
+        var currentAmount = amount
+        var processingRevision = 0
+        var previewBusy = false
+        var currentProcessedFile = if (processedFile.exists()) processedFile else originalFile
+        var currentProcessedBitmap = previewBitmap(currentProcessedFile)
         val originalBitmap = previewBitmap(originalFile)
         val image = android.widget.ImageView(this).apply {
-            setImageBitmap(processedBitmap ?: originalBitmap)
+            setImageBitmap(currentProcessedBitmap ?: originalBitmap)
             scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
             setBackgroundColor(Color.BLACK)
         }
@@ -2053,8 +2057,8 @@ class MainActivity : ComponentActivity() {
             text = when {
                 processingFailed && croppedOnly -> "裁剪已完成 · 风格处理失败"
                 processingFailed -> "处理失败，当前展示原片"
-                croppedOnly -> "AI 裁剪成片 · ${preset.name} ${amount}%"
-                else -> "成片预览 · ${preset.name} ${amount}%"
+                croppedOnly -> "AI 裁剪成片 · ${preset.name} ${currentAmount}%"
+                else -> "成片预览 · ${preset.name} ${currentAmount}%"
             }
             setTextColor(Color.WHITE)
             textSize = 14f
@@ -2064,17 +2068,12 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), dp(8))
             addView(title)
-            addView(image, LinearLayout.LayoutParams(-1, dp(360)))
-            addView(Button(this@MainActivity).apply {
-                text = if (croppedOnly) "按住查看未调色裁剪" else "按住查看原片"
-                setOnTouchListener { _, event ->
-                    val showOriginal = event.action == android.view.MotionEvent.ACTION_DOWN
-                    image.setImageBitmap(if (showOriginal) originalBitmap else processedBitmap ?: originalBitmap)
-                    title.text = if (showOriginal) "原片对比 · 松开返回成片" else "成片预览 · ${preset.name} ${amount}%"
-                    showOriginal
-                }
-            }, LinearLayout.LayoutParams(-1, dp(44)))
+            addView(image, LinearLayout.LayoutParams(-1, dp(300)))
         }
+        val amountLabel = settingDescription("风格强度 · ${currentAmount}%")
+        var saveButton: Button? = null
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        var pendingPreviewRunnable: Runnable? = null
         val dialog = android.app.AlertDialog.Builder(this)
             .setTitle(if (croppedOnly) "AI 裁剪预览" else "拍摄预览")
             .setView(previewContent)
@@ -2087,38 +2086,131 @@ class MainActivity : ComponentActivity() {
                 },
                 null,
             )
-            .setNeutralButton(if (processingFailed) "" else "保存原片", null)
+            .setNeutralButton(if (processingFailed || croppedOnly) "" else "保存原片", null)
             .setNegativeButton("重拍", null)
             .create()
+
+        if (!processingFailed) {
+            previewContent.addView(amountLabel)
+            previewContent.addView(SeekBar(this).apply {
+                max = 100
+                progress = currentAmount
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                        if (!fromUser) return
+                        processingRevision++
+                        amountLabel.text = "风格强度 · ${progress}% · 正在更新预览"
+                        saveButton?.isEnabled = false
+                        pendingPreviewRunnable?.let(mainHandler::removeCallbacks)
+                        val revision = processingRevision
+                        val amountToRender = progress
+                        pendingPreviewRunnable = Runnable {
+                            if (!dialog.isShowing) return@Runnable
+                            previewBusy = true
+                            val previewFile = File(cacheDir, "preview_${timestamp}_$revision.jpg")
+                            photoProcessingExecutor.execute {
+                                val resultBitmap = try {
+                                    PhotoColorProcessor.process(originalFile, previewFile, preset, preset.recipe, amountToRender)
+                                    previewBitmap(previewFile)
+                                } catch (_: Exception) {
+                                    null
+                                } catch (_: OutOfMemoryError) {
+                                    null
+                                }
+                                runOnUiThread {
+                                    previewBusy = false
+                                    if (!dialog.isShowing || revision != processingRevision || resultBitmap == null) {
+                                        resultBitmap?.recycle()
+                                        previewFile.delete()
+                                        if (dialog.isShowing && revision == processingRevision) {
+                                            amountLabel.text = "风格強度 · ${currentAmount}% · 预览更新失败"
+                                            saveButton?.isEnabled = true
+                                        }
+                                        return@runOnUiThread
+                                    }
+                                    val previousFile = currentProcessedFile
+                                    val previousBitmap = currentProcessedBitmap
+                                    currentProcessedFile = previewFile
+                                    currentProcessedBitmap = resultBitmap
+                                    currentAmount = amountToRender
+                                    image.animate().cancel()
+                                    image.animate().alpha(0.55f).setDuration(70L).withEndAction {
+                                        image.setImageBitmap(currentProcessedBitmap ?: originalBitmap)
+                                        image.animate().alpha(1f).setDuration(110L).start()
+                                    }.start()
+                                    title.text = if (croppedOnly) {
+                                        "AI 裁剪成片 · ${preset.name} ${currentAmount}%"
+                                    } else {
+                                        "成片预览 · ${preset.name} ${currentAmount}%"
+                                    }
+                                    amountLabel.text = "风格强度 · ${currentAmount}%"
+                                    saveButton?.isEnabled = true
+                                    previousBitmap?.takeIf { it !== originalBitmap }?.recycle()
+                                    if (previousFile != originalFile && previousFile != temporaryProcessedFile) previousFile.delete()
+                                }
+                            }
+                        }
+                        mainHandler.postDelayed(pendingPreviewRunnable!!, PREVIEW_EDIT_DEBOUNCE_MS)
+                    }
+                    override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+                    override fun onStopTrackingTouch(bar: SeekBar?) = Unit
+                })
+            })
+        }
+
+        previewContent.addView(Button(this).apply {
+            text = if (croppedOnly) "按住查看未调色裁剪" else "按住查看原片"
+            setOnTouchListener { _, event ->
+                val showOriginal = event.action == android.view.MotionEvent.ACTION_DOWN
+                image.setImageBitmap(if (showOriginal) originalBitmap else currentProcessedBitmap ?: originalBitmap)
+                title.text = if (showOriginal) {
+                    if (croppedOnly) "未调色裁剪 · 松开返回成片" else "原片对比 · 松开返回成片"
+                } else if (croppedOnly) {
+                    "AI 裁剪成片 · ${preset.name} ${currentAmount}%"
+                } else {
+                    "成片预览 · ${preset.name} ${currentAmount}%"
+                }
+                showOriginal
+            }
+        }, LinearLayout.LayoutParams(-1, dp(42)))
+
         dialog.setOnDismissListener {
+            pendingPreviewRunnable?.let(mainHandler::removeCallbacks)
             photoCaptureInProgress = false
             shutterButton.isEnabled = true
-            processedBitmap?.recycle()
+            if (currentProcessedBitmap !== originalBitmap) currentProcessedBitmap?.recycle()
             originalBitmap?.recycle()
             originalFile.delete()
             temporaryProcessedFile.delete()
+            if (currentProcessedFile != originalFile && currentProcessedFile != temporaryProcessedFile) currentProcessedFile.delete()
         }
         dialog.show()
+        saveButton = dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)
         if (croppedOnly || processingFailed || preset.style == ColorStyle.NATURAL || amount == 0) {
             dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).visibility = View.GONE
         }
         dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            val file = if (processingFailed) originalFile else processedFile
-            savePhotoToGallery(
-                file,
-                timestamp,
-                when {
-                    croppedOnly && processingFailed -> "AI裁剪"
-                    croppedOnly -> "AI裁剪_${preset.name}"
-                    processingFailed -> "原片"
-                    else -> preset.name
-                },
-            )
-            dialog.dismiss()
+            if (previewBusy) return@setOnClickListener
+            val file = if (processingFailed) originalFile else currentProcessedFile
+            val label = when {
+                croppedOnly && processingFailed -> "AI裁剪"
+                croppedOnly -> "AI裁剪_${preset.name}"
+                processingFailed -> "原片"
+                else -> preset.name
+            }
+            if (savePhotoToGallery(file, timestamp, label)) {
+                if (!processingFailed) {
+                    photoPresetStore.setAmount(preset.id, currentAmount)
+                    if (selectedPresetId == preset.id) {
+                        selectedPresetAmount = currentAmount
+                        updateColorStyleButton()
+                    }
+                }
+                dialog.dismiss()
+            }
         }
         dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-            savePhotoToGallery(originalFile, timestamp, "原片")
-            dialog.dismiss()
+            if (savePhotoToGallery(originalFile, timestamp, "原片")) dialog.dismiss()
         }
         dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
             dialog.dismiss()
@@ -2126,7 +2218,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun savePhotoToGallery(file: File, timestamp: String, label: String) {
+    private fun savePhotoToGallery(file: File, timestamp: String, label: String): Boolean {
         var photoUri: android.net.Uri? = null
         try {
             val values = ContentValues().apply {
@@ -2139,9 +2231,11 @@ class MainActivity : ComponentActivity() {
             val output = contentResolver.openOutputStream(photoUri, "w") ?: error("无法写入相册项目")
             output.use { destination -> file.inputStream().use { source -> source.copyTo(destination) } }
             showStatus("已保存${label}到 Pictures/CameraAgent")
+            return true
         } catch (error: Exception) {
             photoUri?.let { contentResolver.delete(it, null, null) }
             showStatus("照片保存失败：${error.localizedMessage ?: "未知错误"}")
+            return false
         }
     }
 
@@ -2207,5 +2301,6 @@ class MainActivity : ComponentActivity() {
         const val KEY_AUTO_CAPTURE_AFTER_AI = "auto_capture_after_ai"
         const val AUTO_CAPTURE_PREVIEW_DELAY_MS = 420L
         const val CAMERA_ADVICE_FADE_DURATION_MS = 160L
+        const val PREVIEW_EDIT_DEBOUNCE_MS = 140L
     }
 }
