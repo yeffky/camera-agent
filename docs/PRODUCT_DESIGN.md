@@ -120,6 +120,7 @@ Camera Agent 面向希望快速拍出好照片、但不熟悉构图和相机参�
 ## 8. 设计依据
 
 - 当前代码与设备矩阵：[README.md](../README.md)、[MVP 技术设计](MVP_TECHNICAL_DESIGN.md)、[设备能力矩阵](DEVICE_CAPABILITY_MATRIX.md)。
+- 相机页视觉层级、色彩、预设状态和动效规范：[相机页视觉设计](CAMERA_UI_VISUAL_DESIGN.md)。
 - 当前本地预设能力和后续限制：[影像预设调研](PHOTO_PRESET_RESEARCH.md)。
 - 当前云端 Agent 安全边界：[云端 Agent 设计](NEXT_PHASE_CLOUD_AGENT_DESIGN.md)。
 - 竞品功能以本文件链接的官方支持页/产品页为查证入口；页面功能可能随版本变化。
