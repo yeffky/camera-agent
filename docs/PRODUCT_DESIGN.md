@@ -58,6 +58,13 @@ Camera Agent 面向希望快速拍出好照片、但不熟悉构图和相机参�
 - 参数应用后用简短状态反馈；拍摄完成后反馈保存结果。
 - 网络失败时使用明确信息，不依赖无限旋转动画表达等待。
 
+### Android UI 组件与实现路线
+
+- 当前界面使用 Kotlin 原生 Views 和 CameraX `PreviewView`。近期视觉优化优先复用 CameraX 预览，不为样式调整迁移整套相机页。
+- 若继续保留 Views，可选用开源的 [Material Components for Android](https://github.com/material-components/material-components-android)，例如 `BottomNavigationView`、`MaterialCardView`、`TextInputLayout` 和 `Slider`。该库目前处于维护模式，不再计划新增 Views 功能，适合作为渐进迁移期间的过渡组件，不宜作为长期 UI 技术路线。
+- 后续新增页面或重做设置/预设页时，优先评估 [Jetpack Compose Material 3](https://developer.android.com/develop/ui/compose/designsystems/material3)。其提供 Navigation Bar、Card、Button、Slider 等组件；与现有 CameraX View 可分阶段互操作，待验证相机预览、生命周期、性能及可访问性后再决定扩展范围。
+- 本轮先保留原生 Views：优化底部 Tab 的图标、选中态与轻动效，并将模型设置按任务分组。是否引入 Material Components 或逐页迁移 Compose，作为单独技术决策，不和这一轮界面整理绑定。
+
 ## 5. 竞品对比结论
 
 | 竞品组 | 代表体验 | Camera Agent 借鉴点 |

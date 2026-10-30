@@ -89,7 +89,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var cloudAdviceText: TextView
     private lateinit var sendCloudRequestButton: Button
     private lateinit var undoCloudAdviceButton: Button
-    private val navTabViews = mutableMapOf<String, TextView>()
+    private val navTabViews = mutableMapOf<String, LinearLayout>()
+    private val navTabIconViews = mutableMapOf<String, android.widget.ImageView>()
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var analysisExecutor: ExecutorService
     private lateinit var photoProcessingExecutor: ExecutorService
@@ -456,33 +457,57 @@ class MainActivity : ComponentActivity() {
         val tabBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            setBackgroundColor(Color.rgb(15, 18, 24))
+            setPadding(dp(10), dp(5), dp(10), dp(5))
+            setBackgroundColor(Color.rgb(13, 16, 22))
         }
-        listOf("home" to "主界面", "presets" to "风格预设", "settings" to "模型设置").forEach { (tab, label) ->
-            val tabButton = TextView(this).apply {
+        listOf(
+            Triple("home", "主界面", R.drawable.ic_nav_camera),
+            Triple("presets", "风格预设", R.drawable.ic_nav_presets),
+            Triple("settings", "模型设置", R.drawable.ic_settings_gear),
+        ).forEach { (tab, label, iconResource) ->
+            val icon = android.widget.ImageView(this).apply {
+                setImageResource(iconResource)
+                layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
+            }
+            val title = TextView(this).apply {
                 text = label
-                textSize = 13f
+                textSize = 11f
                 gravity = Gravity.CENTER
-                setPadding(dp(8), dp(12), dp(8), dp(12))
-                setTextColor(if (tab == activeTab) Color.WHITE else Color.LTGRAY)
-                setBackgroundResource(if (tab == activeTab) R.drawable.bg_glass_button else 0)
-                setOnClickListener { switchTab(tab) }
+                setPadding(0, dp(3), 0, 0)
+            }
+            val tabButton = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                contentDescription = label
+                addView(icon)
+                addView(title)
+                setOnClickListener {
+                    switchTab(tab)
+                    animate().scaleX(0.96f).scaleY(0.96f).setDuration(70L).withEndAction {
+                        animate().scaleX(1f).scaleY(1f).setDuration(100L).start()
+                    }.start()
+                }
             }
             navTabViews[tab] = tabButton
-            tabBar.addView(tabButton, LinearLayout.LayoutParams(0, dp(48), 1f))
+            navTabIconViews[tab] = icon
+            tabButton.tag = title
+            tabBar.addView(tabButton, LinearLayout.LayoutParams(0, dp(54), 1f).apply {
+                leftMargin = dp(4)
+                rightMargin = dp(4)
+            })
         }
-        root.addView(tabBar, LinearLayout.LayoutParams(-1, dp(54)))
+        root.addView(tabBar, LinearLayout.LayoutParams(-1, dp(64)))
+        updateNavTabAppearance()
 
         return root
     }
 
     private fun switchTab(tab: String) {
+        if (tab !in setOf("home", "presets", "settings")) return
         activeTab = tab
-        navTabViews.forEach { (key, view) ->
-            view.setTextColor(if (key == tab) Color.WHITE else Color.LTGRAY)
-            view.setBackgroundResource(if (key == tab) R.drawable.bg_glass_button else 0)
-        }
+        updateNavTabAppearance()
         val isHome = tab == "home"
         cameraContent.visibility = if (isHome) View.VISIBLE else View.GONE
         pageHost.visibility = if (isHome) View.GONE else View.VISIBLE
@@ -490,6 +515,27 @@ class MainActivity : ComponentActivity() {
             pageHost.removeAllViews()
             val page = if (tab == "presets") createPresetsPage() else settingsPage ?: createAgentSettingsPage().also { settingsPage = it }
             pageHost.addView(page, android.widget.FrameLayout.LayoutParams(-1, -1))
+            pageHost.alpha = 0f
+            pageHost.animate().alpha(1f).setDuration(160L).start()
+        } else {
+            cameraContent.alpha = 0f
+            cameraContent.animate().alpha(1f).setDuration(160L).start()
+        }
+    }
+
+    private fun updateNavTabAppearance() {
+        navTabViews.forEach { (tab, view) ->
+            val selected = tab == activeTab
+            val title = view.tag as? TextView
+            val color = if (selected) Color.rgb(213, 228, 255) else Color.rgb(164, 171, 183)
+            view.background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = dp(18).toFloat()
+                setColor(if (selected) Color.rgb(39, 49, 67) else Color.TRANSPARENT)
+            }
+            view.isSelected = selected
+            title?.setTextColor(if (selected) Color.WHITE else Color.rgb(164, 171, 183))
+            navTabIconViews[tab]?.setColorFilter(color)
         }
     }
 
@@ -746,46 +792,49 @@ class MainActivity : ComponentActivity() {
         val config = agentConfigStore.loadConfig()
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(24))
+            setPadding(dp(16), dp(18), dp(16), dp(28))
+            setBackgroundColor(Color.rgb(10, 13, 18))
         }
         val scrollView = ScrollView(this)
         scrollView.addView(content)
 
         content.addView(settingHeading("云端 Agent 配置"))
         content.addView(settingDescription("OpenAI 兼容 Chat Completions。请求仅在你手动点击后发送，不会自动调用。"))
-        content.addView(settingLabel("协议"))
-        content.addView(settingDescription("OpenAI-compatible · 后续可配置 DeepSeek 等兼容服务的地址与模型"))
+        val connectionCard = createSettingsCard()
+        content.addView(connectionCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
+        connectionCard.addView(settingLabel("模型连接"))
+        connectionCard.addView(settingDescription("支持 OpenAI 兼容接口，可填写服务地址和模型名称。"))
 
         baseUrlEditText = addConfigField(
-            content,
+            connectionCard,
             "API 基础地址",
             "例如 https://api.deepseek.com",
             config.baseUrl,
             android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI,
         )
         endpointPathEditText = addConfigField(
-            content,
+            connectionCard,
             "Chat Completions 路径",
             "/chat/completions",
             config.chatCompletionsPath,
             android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI,
         )
         modelEditText = addConfigField(
-            content,
+            connectionCard,
             "模型名称",
             "例如 deepseek-flash",
             config.model,
             android.text.InputType.TYPE_CLASS_TEXT,
         )
         temperatureEditText = addConfigField(
-            content,
+            connectionCard,
             "Temperature（0–2）",
             "0.3",
             config.temperature.toString(),
             android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL,
         )
         apiKeyEditText = addConfigField(
-            content,
+            connectionCard,
             "API Key（加密保存在本机）",
             "留空则保留当前已保存的 Key",
             "",
@@ -793,7 +842,7 @@ class MainActivity : ComponentActivity() {
         )
         apiKeyEditText.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
         credentialStatusText = settingDescription(credentialStatus())
-        content.addView(credentialStatusText)
+        connectionCard.addView(credentialStatusText)
 
         val configButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val saveButton = Button(this).apply {
@@ -810,16 +859,19 @@ class MainActivity : ComponentActivity() {
         }
         configButtons.addView(saveButton, LinearLayout.LayoutParams(0, dp(40), 1f).apply { rightMargin = dp(8) })
         configButtons.addView(previewButton, LinearLayout.LayoutParams(0, dp(40), 1f))
-        content.addView(configButtons)
+        connectionCard.addView(configButtons, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
+        val requestCard = createSettingsCard()
+        content.addView(requestCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        requestCard.addView(settingLabel("拍摄建议请求"))
         sendCloudRequestButton = Button(this).apply {
             text = "发送当前画面并获取建议"
             setTextColor(Color.WHITE)
             setBackgroundResource(R.drawable.bg_glass_button)
             setOnClickListener { sendCloudRequest() }
         }
-        content.addView(sendCloudRequestButton, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(8) })
-        content.addView(
+        requestCard.addView(sendCloudRequestButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        requestCard.addView(
             settingDescription("发送时会把一张当前取景帧（最长边 1024 像素、压缩后不超过 512 KB）、场景摘要、相机参数和 API Key 发给上方配置的 HTTPS 服务。画面可能包含人脸或私人环境；图像不会保存在本机，也不会上传视频。"),
         )
 
@@ -833,9 +885,11 @@ class MainActivity : ComponentActivity() {
                 credentialStatusText.text = credentialStatus()
             }
         }
-        content.addView(clearKeyButton, LinearLayout.LayoutParams(-1, dp(40)).apply { topMargin = dp(8) })
+        requestCard.addView(clearKeyButton, LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(8) })
 
-        content.addView(settingLabel("云端建议"))
+        val adviceCard = createSettingsCard()
+        content.addView(adviceCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        adviceCard.addView(settingLabel("最近一次云端建议"))
         cloudAdviceText = TextView(this).apply {
             text = "尚未获取云端建议。点击拍摄旁边的 AI 按钮发送请求。"
             textSize = 13f
@@ -844,7 +898,7 @@ class MainActivity : ComponentActivity() {
             setBackgroundResource(R.drawable.bg_glass_button)
             setTextIsSelectable(true)
         }
-        content.addView(cloudAdviceText, matchWidthWrapHeight())
+        adviceCard.addView(cloudAdviceText, matchWidthWrapHeight())
         undoCloudAdviceButton = Button(this).apply {
             text = "撤销上次 AI 调整"
             setTextColor(Color.WHITE)
@@ -852,9 +906,11 @@ class MainActivity : ComponentActivity() {
             setBackgroundResource(R.drawable.bg_glass_button)
             setOnClickListener { undoLastCloudAdvice() }
         }
-        content.addView(undoCloudAdviceButton, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(8) })
+        adviceCard.addView(undoCloudAdviceButton, LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(8) })
 
-        content.addView(settingLabel("请求预览"))
+        val previewCard = createSettingsCard()
+        content.addView(previewCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        previewCard.addView(settingLabel("请求预览"))
         requestPreviewText = TextView(this).apply {
             text = "尚未生成请求预览。"
             textSize = 12f
@@ -863,8 +919,8 @@ class MainActivity : ComponentActivity() {
             setBackgroundResource(R.drawable.bg_glass_button)
             setTextIsSelectable(true)
         }
-        content.addView(requestPreviewText, matchWidthWrapHeight())
-        content.addView(
+        previewCard.addView(requestPreviewText, matchWidthWrapHeight())
+        previewCard.addView(
             settingDescription("云端调用始终由你手动触发；每次只发送一张压缩取景帧。模型可建议本地预设，客户端只应用预设库中已登记的方案。"),
         )
         return scrollView
@@ -889,6 +945,12 @@ class MainActivity : ComponentActivity() {
             setBackgroundResource(R.drawable.bg_glass_button)
             parent.addView(this, matchWidthWrapHeight())
         }
+    }
+
+    private fun createSettingsCard() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(14), dp(10), dp(14), dp(14))
+        setBackgroundResource(R.drawable.bg_glass_card)
     }
 
     private fun settingHeading(text: String) = TextView(this).apply {
