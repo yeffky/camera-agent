@@ -4,7 +4,7 @@ Android Camera Agent MVP: a native camera app exploring scene-aware framing, cam
 
 ## Current status
 
-Stages A–D are implemented: CameraX preview/capture, composition guides, device capability reporting, on-device scene and face analysis, framing guidance, automatic exposure/focus metering suggestions, and local color styles applied after capture. Stage E requires testing on physical phones from multiple manufacturers.
+Stages A–D are implemented. The current product iteration adds a persistent bottom tab bar for the camera, style presets, and model settings; an eight-style local preset library with adjustable strength and photo controls for exposure, contrast, highlights, shadows, temperature, tint, and saturation; custom recipes; and a post-capture preview to compare and save the processed image or original. Agent responses can select a built-in local preset and strength, with the same apply-result and undo flow. Physical-device acceptance across manufacturers remains pending. Advanced Camera2 controls remain deferred.
 
 See [docs/MVP_TECHNICAL_DESIGN.md](docs/MVP_TECHNICAL_DESIGN.md) for scope, architecture, milestones, and limitations.
 Use [docs/DEVICE_CAPABILITY_MATRIX.md](docs/DEVICE_CAPABILITY_MATRIX.md) to record real-device capability reports.

@@ -98,14 +98,23 @@ object CameraAdviceParser {
             val kind = item.optString("kind")
             val value = item.opt("value")
             when (kind) {
-                "exposure_ev", "zoom_ratio" -> {
+                "exposure_ev", "zoom_ratio", "preset_strength" -> {
                     val number = (value as? Number)?.toDouble()
                         ?: throw CloudApiException("云端参数值不是数字")
                     if (!number.isFinite()) throw CloudApiException("云端参数值无效")
                     if (kind == "zoom_ratio" && number <= 0.0) {
                         throw CloudApiException("云端变焦倍率必须大于 0")
                     }
+                    if (kind == "preset_strength" && number !in 0.0..100.0) {
+                        throw CloudApiException("云端预设强度必须在 0 到 100 之间")
+                    }
                     CameraAdviceAction(kind, numberValue = number)
+                }
+                "preset_id" -> {
+                    val id = (value as? String)?.trim()
+                        ?: throw CloudApiException("云端预设建议格式无效")
+                    if (PhotoPresets.find(id) == null) throw CloudApiException("云端返回了不支持的风格预设")
+                    CameraAdviceAction(kind, textValue = id)
                 }
                 "color_style" -> {
                     val style = (value as? String)?.uppercase(Locale.US)
@@ -131,5 +140,5 @@ object CameraAdviceParser {
     private const val MAX_ACTIONS = 8
     private const val MAX_TEXT_LENGTH = 200
     private const val MAX_RATIONALE_LENGTH = 400
-    private val COLOR_STYLES = setOf("NATURAL", "WARM", "SOFT", "VIVID", "COOL")
+    private val COLOR_STYLES = ColorStyle.values().map { it.name }.toSet()
 }

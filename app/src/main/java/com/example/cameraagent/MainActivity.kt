@@ -48,6 +48,8 @@ private data class AgentApplySnapshot(
     val zoomRatio: Float?,
     val colorStyle: ColorStyle,
     val manualColorOverride: Boolean,
+    val presetId: String,
+    val presetAmount: Int,
 )
 
 class MainActivity : ComponentActivity() {
@@ -63,10 +65,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var colorStyleButton: Button
     private lateinit var quickColorButton: Button
     private lateinit var cameraContent: android.widget.FrameLayout
+    private lateinit var pageHost: android.widget.FrameLayout
     private lateinit var controlsPanel: View
     private lateinit var agentCircleButton: View
     private lateinit var shutterButton: View
     private lateinit var agentConfigStore: AgentConfigStore
+    private lateinit var photoPresetStore: PhotoPresetStore
     private lateinit var baseUrlEditText: EditText
     private lateinit var endpointPathEditText: EditText
     private lateinit var modelEditText: EditText
@@ -77,11 +81,11 @@ class MainActivity : ComponentActivity() {
     private lateinit var cloudAdviceText: TextView
     private lateinit var sendCloudRequestButton: Button
     private lateinit var undoCloudAdviceButton: Button
+    private val navTabViews = mutableMapOf<String, TextView>()
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var analysisExecutor: ExecutorService
     private lateinit var photoProcessingExecutor: ExecutorService
     private lateinit var cloudApiExecutor: ExecutorService
-    private var configDialog: android.app.Dialog? = null
 
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
@@ -89,6 +93,10 @@ class MainActivity : ComponentActivity() {
     private var sceneAnalyzer: AgentSceneAnalyzer? = null
     private var latestAssessment: SceneAssessment? = null
     private var selectedColorStyle = ColorStyle.NATURAL
+    private var selectedPresetId = "natural"
+    private var selectedPresetAmount = 0
+    private var activeTab = "home"
+    private var settingsPage: View? = null
     private var recommendedColorStyle = ColorStyle.NATURAL
     private var autoModeEnabled = false
     private var manualColorOverride = false
@@ -117,6 +125,11 @@ class MainActivity : ComponentActivity() {
         photoProcessingExecutor = Executors.newSingleThreadExecutor()
         cloudApiExecutor = Executors.newSingleThreadExecutor()
         agentConfigStore = AgentConfigStore(this)
+        photoPresetStore = PhotoPresetStore(this)
+        selectedPresetId = photoPresetStore.selectedId()
+        selectedColorStyle = photoPresetStore.find(selectedPresetId)?.style ?: ColorStyle.NATURAL
+        selectedPresetAmount = photoPresetStore.amount(selectedPresetId)
+        manualColorOverride = selectedPresetId != "natural"
         setContentView(createCameraScreen())
 
         if (hasCameraPermission()) startCamera() else requestCameraPermission.launch(Manifest.permission.CAMERA)
@@ -132,11 +145,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun createCameraScreen(): View {
-        val root = android.widget.FrameLayout(this).apply {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.BLACK)
         }
+        val contentHost = android.widget.FrameLayout(this)
+        root.addView(contentHost, LinearLayout.LayoutParams(-1, 0, 1f))
         cameraContent = android.widget.FrameLayout(this)
-        root.addView(cameraContent, android.widget.FrameLayout.LayoutParams(-1, -1))
+        pageHost = android.widget.FrameLayout(this).apply { visibility = View.GONE }
+        contentHost.addView(cameraContent, android.widget.FrameLayout.LayoutParams(-1, -1))
+        contentHost.addView(pageHost, android.widget.FrameLayout.LayoutParams(-1, -1))
 
         previewView = PreviewView(this).apply {
             implementationMode = PreviewView.ImplementationMode.PERFORMANCE
@@ -172,7 +190,7 @@ class MainActivity : ComponentActivity() {
             setBackgroundResource(R.drawable.bg_glass_button)
             setPadding(dp(10), dp(10), dp(10), dp(10))
             setOnClickListener {
-                showAgentConfigDialog()
+                switchTab("settings")
             }
         }
         topBar.addView(
@@ -338,6 +356,7 @@ class MainActivity : ComponentActivity() {
         bottomBar.addView(quickColorButton, LinearLayout.LayoutParams(dp(54), dp(54)).apply {
             rightMargin = dp(28)
         })
+        updateColorStyleButton()
 
         // 主拍摄按钮（大圆形）
         shutterButton = View(this).apply {
@@ -354,7 +373,10 @@ class MainActivity : ComponentActivity() {
                 setPadding(dp(12), dp(12), dp(12), dp(12))
             }
             addView(icon, android.widget.FrameLayout.LayoutParams(-1, -1))
-            setOnClickListener { sendCloudRequest() }
+            setOnClickListener {
+                switchTab("settings")
+                sendCloudRequest()
+            }
         }
         bottomBar.addView(agentCircleButton, LinearLayout.LayoutParams(dp(60), dp(60)).apply {
             leftMargin = dp(28)
@@ -365,23 +387,287 @@ class MainActivity : ComponentActivity() {
             android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM),
         )
 
+        val tabBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            setBackgroundColor(Color.rgb(15, 18, 24))
+        }
+        listOf("home" to "主界面", "presets" to "风格预设", "settings" to "模型设置").forEach { (tab, label) ->
+            val tabButton = TextView(this).apply {
+                text = label
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(12), dp(8), dp(12))
+                setTextColor(if (tab == activeTab) Color.WHITE else Color.LTGRAY)
+                setBackgroundResource(if (tab == activeTab) R.drawable.bg_glass_button else 0)
+                setOnClickListener { switchTab(tab) }
+            }
+            navTabViews[tab] = tabButton
+            tabBar.addView(tabButton, LinearLayout.LayoutParams(0, dp(48), 1f))
+        }
+        root.addView(tabBar, LinearLayout.LayoutParams(-1, dp(54)))
+
         return root
     }
 
-    private fun showAgentConfigDialog() {
-        if (configDialog?.isShowing == true) return
-        val dialogView = createAgentSettingsPage()
-        val cardContainer = android.widget.FrameLayout(this).apply {
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            setBackgroundResource(R.drawable.bg_glass_card)
-            addView(dialogView, android.widget.FrameLayout.LayoutParams(-1, -1))
+    private fun switchTab(tab: String) {
+        activeTab = tab
+        navTabViews.forEach { (key, view) ->
+            view.setTextColor(if (key == tab) Color.WHITE else Color.LTGRAY)
+            view.setBackgroundResource(if (key == tab) R.drawable.bg_glass_button else 0)
         }
-        configDialog = android.app.AlertDialog.Builder(this)
-            .setView(cardContainer)
-            .create().apply {
-                window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
-                show()
+        val isHome = tab == "home"
+        cameraContent.visibility = if (isHome) View.VISIBLE else View.GONE
+        pageHost.visibility = if (isHome) View.GONE else View.VISIBLE
+        if (!isHome) {
+            pageHost.removeAllViews()
+            val page = if (tab == "presets") createPresetsPage() else settingsPage ?: createAgentSettingsPage().also { settingsPage = it }
+            pageHost.addView(page, android.widget.FrameLayout.LayoutParams(-1, -1))
+        }
+    }
+
+    private fun createPresetsPage(): View {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(24))
+        }
+        val scroll = ScrollView(this).apply { addView(content) }
+        content.addView(settingHeading("风格预设"))
+        content.addView(settingDescription("调整影调和照片参数。所有调整都从原片重新生成；拍摄后可比较并保存成片或原片。"))
+
+        val presetStrip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        photoPresetStore.allPresets().forEach { preset ->
+            presetStrip.addView(TextView(this).apply {
+                text = preset.name
+                textSize = 12f
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                setBackgroundResource(if (preset.id == selectedPresetId) R.drawable.bg_glass_card else R.drawable.bg_glass_button)
+                setOnClickListener { selectPreset(preset.id) }
+            }, LinearLayout.LayoutParams(-2, dp(42)).apply { rightMargin = dp(8) })
+        }
+        content.addView(android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(presetStrip)
+        }, LinearLayout.LayoutParams(-1, dp(46)))
+
+        val selected = photoPresetStore.find(selectedPresetId) ?: PhotoPresets.all.first()
+        content.addView(settingLabel("当前：${selected.name} · ${selectedPresetAmount}%"))
+        val selectedLabel = settingDescription("${selected.name} · ${selectedPresetAmount}%")
+        content.addView(selectedLabel)
+        val amountBar = SeekBar(this).apply {
+            max = 100
+            progress = selectedPresetAmount
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    selectedPresetAmount = progress
+                    photoPresetStore.setAmount(selectedPresetId, progress)
+                    selectedLabel.text = "${selected.name} · $progress%"
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(bar: SeekBar?) = Unit
+            })
+        }
+        content.addView(amountBar)
+        content.addView(Button(this).apply {
+            text = "恢复此预设默认强度"
+            setTextColor(Color.WHITE)
+            setBackgroundResource(R.drawable.bg_glass_button)
+            setOnClickListener {
+                selectedPresetAmount = selected.defaultAmount
+                photoPresetStore.setAmount(selectedPresetId, selectedPresetAmount)
+                switchTab("presets")
             }
+        }, LinearLayout.LayoutParams(-1, dp(40)).apply { topMargin = dp(4) })
+
+        var recipe = photoPresetStore.recipe(selectedPresetId)
+        content.addView(settingLabel("成片调整"))
+        addRecipeSlider(content, "曝光", recipe.exposureEv, -2f, 2f) { value ->
+            recipe = recipe.copy(exposureEv = value); photoPresetStore.setRecipe(selectedPresetId, recipe)
+        }
+        addRecipeSlider(content, "对比", recipe.contrast, -1f, 1f) { value ->
+            recipe = recipe.copy(contrast = value); photoPresetStore.setRecipe(selectedPresetId, recipe)
+        }
+        addRecipeSlider(content, "高光", recipe.highlights, -1f, 1f) { value ->
+            recipe = recipe.copy(highlights = value); photoPresetStore.setRecipe(selectedPresetId, recipe)
+        }
+        addRecipeSlider(content, "阴影", recipe.shadows, -1f, 1f) { value ->
+            recipe = recipe.copy(shadows = value); photoPresetStore.setRecipe(selectedPresetId, recipe)
+        }
+        addRecipeSlider(content, "色温", recipe.temperature, -1f, 1f) { value ->
+            recipe = recipe.copy(temperature = value); photoPresetStore.setRecipe(selectedPresetId, recipe)
+        }
+        addRecipeSlider(content, "色调", recipe.tint, -1f, 1f) { value ->
+            recipe = recipe.copy(tint = value); photoPresetStore.setRecipe(selectedPresetId, recipe)
+        }
+        addRecipeSlider(content, "饱和度", recipe.saturation, -1f, 1f) { value ->
+            recipe = recipe.copy(saturation = value); photoPresetStore.setRecipe(selectedPresetId, recipe)
+        }
+        content.addView(Button(this).apply {
+            text = "恢复此预设默认调整"
+            setTextColor(Color.WHITE)
+            setBackgroundResource(R.drawable.bg_glass_button)
+            setOnClickListener {
+                photoPresetStore.setRecipe(selectedPresetId, selected.recipe)
+                switchTab("presets")
+            }
+        }, LinearLayout.LayoutParams(-1, dp(40)).apply { topMargin = dp(4) })
+
+        content.addView(Button(this).apply {
+            text = "另存为自定义预设"
+            setTextColor(Color.WHITE)
+            setBackgroundResource(R.drawable.bg_glass_button)
+            setOnClickListener { promptCreatePreset(recipe) }
+        }, LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(10) })
+
+        val favoriteIds = photoPresetStore.favorites()
+        val recentIds = photoPresetStore.recent()
+        if (recentIds.isNotEmpty()) {
+            content.addView(settingLabel("最近使用"))
+            content.addView(settingDescription(recentIds.mapNotNull(photoPresetStore::find).joinToString("  ·  ") { it.name }))
+        }
+        if (favoriteIds.isNotEmpty()) {
+            content.addView(settingLabel("我的收藏"))
+            content.addView(settingDescription(photoPresetStore.allPresets().filter { it.id in favoriteIds }.joinToString("  ·  ") { it.name }))
+        }
+
+        photoPresetStore.allPresets().groupBy { it.category }.forEach { (category, presets) ->
+            content.addView(settingLabel(category))
+            presets.forEach { preset ->
+                val card = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(8), dp(8), dp(8))
+                    setBackgroundResource(if (preset.id == selectedPresetId) R.drawable.bg_glass_card else R.drawable.bg_glass_button)
+                    setOnClickListener { selectPreset(preset.id) }
+                }
+                val description = TextView(this).apply {
+                    text = "${preset.name}\n${preset.description}"
+                    textSize = 13f
+                    setTextColor(Color.WHITE)
+                    setPadding(0, dp(4), 0, dp(4))
+                    setOnClickListener { selectPreset(preset.id) }
+                }
+                card.addView(description, LinearLayout.LayoutParams(0, -2, 1f))
+                val favorite = TextView(this).apply {
+                    text = if (preset.id in favoriteIds) "★" else "☆"
+                    textSize = 22f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.rgb(255, 205, 90))
+                    setPadding(dp(12), dp(4), dp(12), dp(4))
+                    setOnClickListener {
+                        photoPresetStore.toggleFavorite(preset.id)
+                        switchTab("presets")
+                    }
+                }
+                card.addView(favorite, LinearLayout.LayoutParams(dp(48), -2))
+                if (preset.isCustom) {
+                    card.addView(TextView(this).apply {
+                        text = "⋮"
+                        textSize = 22f
+                        gravity = Gravity.CENTER
+                        setTextColor(Color.WHITE)
+                        setOnClickListener { showCustomPresetMenu(preset) }
+                    }, LinearLayout.LayoutParams(dp(40), -2))
+                }
+                content.addView(card, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            }
+        }
+        return scroll
+    }
+
+    private fun addRecipeSlider(
+        parent: LinearLayout,
+        label: String,
+        value: Float,
+        minValue: Float,
+        maxValue: Float,
+        onChanged: (Float) -> Unit,
+    ) {
+        val valueLabel = settingDescription("$label  ${"%.2f".format(Locale.US, value)}")
+        parent.addView(valueLabel)
+        parent.addView(SeekBar(this).apply {
+            max = 200
+            progress = (((value - minValue) / (maxValue - minValue)) * max).roundToInt().coerceIn(0, max)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    val adjusted = minValue + (maxValue - minValue) * progress / max.toFloat()
+                    valueLabel.text = "$label  ${"%.2f".format(Locale.US, adjusted)}"
+                    onChanged(adjusted)
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(bar: SeekBar?) = Unit
+            })
+        })
+    }
+
+    private fun promptCreatePreset(recipe: PhotoRecipe) {
+        val nameInput = EditText(this).apply { hint = "例如：我的暖色人像"; setSingleLine(true) }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("保存为自定义预设")
+            .setView(nameInput)
+            .setPositiveButton("保存", null)
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.show()
+        dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val preset = photoPresetStore.createCustomPreset(
+                nameInput.text.toString().ifBlank { "我的${photoPresetStore.find(selectedPresetId)?.name ?: "预设"}" },
+                selectedColorStyle,
+                selectedPresetAmount,
+                recipe,
+            )
+            selectPreset(preset.id)
+            dialog.dismiss()
+        }
+    }
+
+    private fun showCustomPresetMenu(preset: PhotoPreset) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(preset.name)
+            .setItems(arrayOf("重命名", "删除")) { _, choice ->
+                if (choice == 0) {
+                    val input = EditText(this).apply { setText(preset.name); setSingleLine(true) }
+                    android.app.AlertDialog.Builder(this).setTitle("重命名预设").setView(input)
+                        .setPositiveButton("保存") { _, _ ->
+                            photoPresetStore.renameCustomPreset(preset.id, input.text.toString())
+                            switchTab("presets")
+                        }.setNegativeButton("取消", null).show()
+                } else {
+                    android.app.AlertDialog.Builder(this).setTitle("删除自定义预设？")
+                        .setMessage("${preset.name} 将从本机预设列表中移除。")
+                        .setPositiveButton("删除") { _, _ ->
+                            photoPresetStore.deleteCustomPreset(preset.id)
+                            if (selectedPresetId == preset.id) {
+                                selectedPresetId = "natural"
+                                selectedColorStyle = ColorStyle.NATURAL
+                                selectedPresetAmount = photoPresetStore.amount("natural")
+                                manualColorOverride = false
+                            }
+                            switchTab("presets")
+                        }.setNegativeButton("取消", null).show()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun selectPreset(id: String) {
+        val preset = photoPresetStore.find(id) ?: return
+        if (autoModeEnabled) toggleAutoMode()
+        selectedPresetId = id
+        photoPresetStore.setSelectedId(id)
+        selectedColorStyle = preset.style
+        selectedPresetAmount = photoPresetStore.amount(id)
+        photoPresetStore.markRecent(id)
+        manualColorOverride = true
+        updateColorStyleButton()
+        latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
+        switchTab("presets")
     }
 
     private fun createAgentSettingsPage(): View {
@@ -507,7 +793,7 @@ class MainActivity : ComponentActivity() {
         }
         content.addView(requestPreviewText, matchWidthWrapHeight())
         content.addView(
-            settingDescription("自动低频触发：后续阶段接入。当前只有手动点击才发送请求；每次仅发送一张压缩取景帧。"),
+            settingDescription("云端调用始终由你手动触发；每次只发送一张压缩取景帧。模型可建议本地预设，客户端只应用预设库中已登记的方案。"),
         )
         return scrollView
     }
@@ -645,6 +931,8 @@ class MainActivity : ComponentActivity() {
             .put("zoom_ratio", zoomState?.zoomRatio ?: 1.0)
             .put("exposure_ev", exposureIndex * exposureStep)
             .put("color_style", selectedColorStyle.name.lowercase(Locale.US))
+            .put("preset_id", selectedPresetId)
+            .put("preset_strength", selectedPresetAmount)
         val supportedControls = JSONArray()
         if (zoomState != null && zoomState.maxZoomRatio > zoomState.minZoomRatio) {
             supportedControls.put("zoom_ratio")
@@ -653,6 +941,8 @@ class MainActivity : ComponentActivity() {
             supportedControls.put("exposure_ev")
         }
         supportedControls.put("color_style")
+        supportedControls.put("preset_id")
+        supportedControls.put("preset_strength")
         supportedControls.put("composition")
         val capabilities = JSONObject()
             .put("supported_controls", supportedControls)
@@ -698,11 +988,14 @@ class MainActivity : ComponentActivity() {
                     .put("role", "system")
                     .put(
                         "content",
-                        "你是拍摄参数建议助手。只返回 JSON 对象，不要 Markdown。格式为 " +
+            "你是拍摄参数建议助手。只返回 JSON 对象，不要 Markdown。格式为 " +
                             "{summary:string,rationale:string,suggestions:[{kind:string,value:number|string}]}。" +
                             "kind 仅可为 exposure_ev（目标曝光补偿 EV）、zoom_ratio（目标倍率）、" +
-                            "color_style（NATURAL/WARM/SOFT/VIVID/COOL）或 composition（构图提示）。" +
-                            "只能依据用户消息附带的这一张图像和结构化数据进行建议；只能建议 device_capabilities.supported_controls 中的相机控制，不得要求上传其他图像或执行操作。",
+                            "color_style（NATURAL/WARM/SOFT/VIVID/COOL/MONOCHROME）、" +
+                            "preset_id（本地预设 ID）或 preset_strength（0 到 100）或 composition（构图提示）。" +
+                            "preset_id 只能从 natural、warm_film、faded_film、cinematic、neon、portrait、food、monochrome 中选择。" +
+                            "只能依据用户消息附带的这一张图像和结构化数据进行建议；相机控制必须属于 device_capabilities.supported_controls，" +
+                            "风格只能建议上述本地预设库中的 preset_id 和 0 到 100 的 preset_strength。不得要求上传其他图像或执行操作。",
                     ),
             )
             .put(JSONObject().put("role", "user").put("content", userMessageContent))
@@ -742,8 +1035,8 @@ class MainActivity : ComponentActivity() {
         val typedApiKey = if (::apiKeyEditText.isInitialized) apiKeyEditText.text.toString() else ""
         val apiKey = typedApiKey.ifBlank { agentConfigStore.loadApiKey().orEmpty() }
         if (apiKey.isBlank()) {
-            showStatus("未配置 API Key，请先在右上角配置")
-            showAgentConfigDialog()
+            showStatus("未配置 API Key，请在模型设置页填写")
+            switchTab("settings")
             return
         }
         val capture = imageCapture ?: run {
@@ -827,6 +1120,8 @@ class MainActivity : ComponentActivity() {
                         "exposure_ev" -> "曝光补偿 ${action.numberValue} EV"
                         "zoom_ratio" -> "变焦 ${action.numberValue}×"
                         "color_style" -> "影调 ${ColorStyle.valueOf(action.textValue!!).displayName}"
+                        "preset_id" -> "风格预设 ${photoPresetStore.find(action.textValue!!)?.name}"
+                        "preset_strength" -> "预设强度 ${action.numberValue?.roundToInt()}%"
                         else -> "构图：${action.textValue}"
                     },
                 )
@@ -855,6 +1150,8 @@ class MainActivity : ComponentActivity() {
             zoomRatio = zoomState?.zoomRatio,
             colorStyle = selectedColorStyle,
             manualColorOverride = manualColorOverride,
+            presetId = selectedPresetId,
+            presetAmount = selectedPresetAmount,
         )
         val outcomes = mutableListOf<String>()
         var pendingActions = advice.actions.size
@@ -895,7 +1192,7 @@ class MainActivity : ComponentActivity() {
                 showAgentConfigStatus(summary)
             }
         }
-        advice.actions.forEach { action ->
+        advice.actions.sortedBy { if (it.kind == "preset_id") 0 else if (it.kind == "preset_strength") 1 else 2 }.forEach { action ->
             when (action.kind) {
                 "exposure_ev" -> {
                     val state = activeCamera.cameraInfo.exposureState
@@ -949,10 +1246,43 @@ class MainActivity : ComponentActivity() {
                         recordOutcome("影调：自动影调模式启用", applied = false, skipped = true)
                     } else {
                         selectedColorStyle = ColorStyle.valueOf(action.textValue!!)
+                        selectedPresetId = PhotoPresets.all.firstOrNull { it.style == selectedColorStyle }?.id ?: "natural"
+                        photoPresetStore.setSelectedId(selectedPresetId)
+                        selectedPresetAmount = photoPresetStore.amount(selectedPresetId)
                         manualColorOverride = true
                         updateColorStyleButton()
                         latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
                         recordOutcome("影调：${selectedColorStyle.displayName}", applied = true)
+                    }
+                }
+                "preset_id" -> {
+                    if (autoModeEnabled) {
+                        recordOutcome("风格预设：自动影调模式启用", applied = false, skipped = true)
+                    } else {
+                        val preset = photoPresetStore.find(action.textValue!!)
+                        if (preset == null) {
+                            recordOutcome("风格预设：本地不存在该预设", applied = false, skipped = true)
+                        } else {
+                            selectedPresetId = preset.id
+                            photoPresetStore.setSelectedId(preset.id)
+                            selectedColorStyle = preset.style
+                            selectedPresetAmount = photoPresetStore.amount(preset.id)
+                            photoPresetStore.markRecent(preset.id)
+                            manualColorOverride = true
+                            updateColorStyleButton()
+                            latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
+                            recordOutcome("风格预设：${preset.name}", applied = true)
+                        }
+                    }
+                }
+                "preset_strength" -> {
+                    if (autoModeEnabled) {
+                        recordOutcome("预设强度：自动影调模式启用", applied = false, skipped = true)
+                    } else {
+                        val amount = action.numberValue?.roundToInt()?.coerceIn(0, 100) ?: selectedPresetAmount
+                        selectedPresetAmount = amount
+                        photoPresetStore.setAmount(selectedPresetId, amount)
+                        recordOutcome("${photoPresetStore.find(selectedPresetId)?.name ?: "风格预设"} 强度：$amount%", applied = true)
                     }
                 }
                 "composition" -> {
@@ -1021,6 +1351,10 @@ class MainActivity : ComponentActivity() {
         }
         selectedColorStyle = snapshot.colorStyle
         manualColorOverride = snapshot.manualColorOverride
+        selectedPresetId = snapshot.presetId
+        photoPresetStore.setSelectedId(selectedPresetId)
+        selectedPresetAmount = snapshot.presetAmount
+        photoPresetStore.setAmount(selectedPresetId, selectedPresetAmount)
         updateColorStyleButton()
         latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
         restoreSchedulingComplete = true
@@ -1118,6 +1452,9 @@ class MainActivity : ComponentActivity() {
         recommendedColorStyle = assessment.recommendedColorStyle
         if (autoModeEnabled) {
             selectedColorStyle = recommendedColorStyle
+            selectedPresetId = PhotoPresets.all.firstOrNull { it.style == selectedColorStyle }?.id ?: "natural"
+            selectedPresetAmount = photoPresetStore.amount(selectedPresetId)
+            photoPresetStore.setSelectedId(selectedPresetId)
             manualColorOverride = false
             applyAutoExposure(assessment.exposureCompensationOffset)
             applyAutoFocus(assessment)
@@ -1150,6 +1487,9 @@ class MainActivity : ComponentActivity() {
             manualColorOverride = false
             latestAssessment?.let { assessment ->
                 selectedColorStyle = assessment.recommendedColorStyle
+                selectedPresetId = PhotoPresets.all.firstOrNull { it.style == selectedColorStyle }?.id ?: "natural"
+                selectedPresetAmount = photoPresetStore.amount(selectedPresetId)
+                photoPresetStore.setSelectedId(selectedPresetId)
                 applyAutoExposure(assessment.exposureCompensationOffset)
             }
         } else {
@@ -1168,24 +1508,29 @@ class MainActivity : ComponentActivity() {
         val styles = ColorStyle.values()
         val nextIndex = (styles.indexOf(selectedColorStyle) + 1) % styles.size
         selectedColorStyle = styles[nextIndex]
+        selectedPresetId = PhotoPresets.all.firstOrNull { it.style == selectedColorStyle }?.id ?: "natural"
+        photoPresetStore.setSelectedId(selectedPresetId)
+        selectedPresetAmount = photoPresetStore.amount(selectedPresetId)
+        photoPresetStore.markRecent(selectedPresetId)
         manualColorOverride = true
         updateColorStyleButton()
         latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
     }
 
     private fun updateColorStyleButton() {
+        val selectedPresetName = photoPresetStore.find(selectedPresetId)?.name ?: selectedColorStyle.displayName
         if (::colorStyleButton.isInitialized) {
             colorStyleButton.isEnabled = !autoModeEnabled
             val recommended = recommendedColorStyle.displayName
             colorStyleButton.text = if (autoModeEnabled) {
                 "自动影调：${selectedColorStyle.displayName}"
             } else {
-                "影调：${selectedColorStyle.displayName} · 建议：$recommended"
+                "影调：$selectedPresetName ${selectedPresetAmount}% · 建议：$recommended"
             }
         }
         if (::quickColorButton.isInitialized) {
             quickColorButton.isEnabled = !autoModeEnabled
-            quickColorButton.text = selectedColorStyle.displayName
+            quickColorButton.text = selectedPresetName
         }
     }
 
@@ -1322,13 +1667,15 @@ class MainActivity : ComponentActivity() {
         }
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val capturedFile = File(cacheDir, "capture_$timestamp.jpg")
-        val styleAtCapture = selectedColorStyle
+        val presetAtCapture = (photoPresetStore.find(selectedPresetId) ?: PhotoPresets.all.first())
+            .copy(recipe = photoPresetStore.recipe(selectedPresetId))
+        val amountAtCapture = selectedPresetAmount
         val output = ImageCapture.OutputFileOptions.Builder(capturedFile).build()
 
         capture.takePicture(output, cameraExecutor, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                 photoProcessingExecutor.execute {
-                    saveCapturedPhoto(capturedFile, timestamp, styleAtCapture)
+                    prepareCapturedPhoto(capturedFile, timestamp, presetAtCapture, amountAtCapture)
                 }
             }
 
@@ -1339,13 +1686,13 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    private fun saveCapturedPhoto(capturedFile: File, timestamp: String, style: ColorStyle) {
+    private fun prepareCapturedPhoto(capturedFile: File, timestamp: String, preset: PhotoPreset, amount: Int) {
         val processedFile = File(cacheDir, "processed_$timestamp.jpg")
         var outputFile = capturedFile
         var styleProcessingFailed = false
-        if (style != ColorStyle.NATURAL) {
+        if (amount > 0 && (preset.style != ColorStyle.NATURAL || preset.recipe != PhotoRecipe())) {
             try {
-                PhotoColorProcessor.process(capturedFile, processedFile, style)
+                PhotoColorProcessor.process(capturedFile, processedFile, preset, preset.recipe, amount)
                 outputFile = processedFile
             } catch (_: Exception) {
                 styleProcessingFailed = true
@@ -1354,30 +1701,95 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        val previewFile = outputFile
+        runOnUiThread { showCapturePreview(capturedFile, previewFile, processedFile, timestamp, preset, amount, styleProcessingFailed) }
+    }
+
+    private fun showCapturePreview(
+        originalFile: File,
+        processedFile: File,
+        temporaryProcessedFile: File,
+        timestamp: String,
+        preset: PhotoPreset,
+        amount: Int,
+        processingFailed: Boolean,
+    ) {
+        fun previewBitmap(file: File): android.graphics.Bitmap? {
+            val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 }
+            return android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
+        }
+        val processedBitmap = previewBitmap(processedFile)
+        val originalBitmap = previewBitmap(originalFile)
+        val image = android.widget.ImageView(this).apply {
+            setImageBitmap(processedBitmap ?: originalBitmap)
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(Color.BLACK)
+        }
+        val title = TextView(this).apply {
+            text = if (processingFailed) "处理失败，当前展示原片" else "成片预览 · ${preset.name} ${amount}%"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        val previewContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            addView(title)
+            addView(image, LinearLayout.LayoutParams(-1, dp(360)))
+            addView(Button(this@MainActivity).apply {
+                text = "按住查看原片"
+                setOnTouchListener { _, event ->
+                    val showOriginal = event.action == android.view.MotionEvent.ACTION_DOWN
+                    image.setImageBitmap(if (showOriginal) originalBitmap else processedBitmap ?: originalBitmap)
+                    title.text = if (showOriginal) "原片对比 · 松开返回成片" else "成片预览 · ${preset.name} ${amount}%"
+                    showOriginal
+                }
+            }, LinearLayout.LayoutParams(-1, dp(44)))
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("拍摄预览")
+            .setView(previewContent)
+            .setPositiveButton(if (processingFailed) "保存原片" else "保存成片", null)
+            .setNeutralButton(if (processingFailed) "" else "保存原片", null)
+            .setNegativeButton("重拍", null)
+            .create()
+        dialog.setOnDismissListener {
+            processedBitmap?.recycle()
+            originalBitmap?.recycle()
+            originalFile.delete()
+            temporaryProcessedFile.delete()
+        }
+        dialog.show()
+        if (processingFailed || preset.style == ColorStyle.NATURAL || amount == 0) {
+            dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).visibility = View.GONE
+        }
+        dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val file = if (processingFailed) originalFile else processedFile
+            savePhotoToGallery(file, timestamp, if (processingFailed) "原片" else preset.name)
+            dialog.dismiss()
+        }
+        dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            savePhotoToGallery(originalFile, timestamp, "原片")
+            dialog.dismiss()
+        }
+    }
+
+    private fun savePhotoToGallery(file: File, timestamp: String, label: String) {
         var photoUri: android.net.Uri? = null
         try {
             val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, "CameraAgent_$timestamp.jpg")
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "CameraAgent_${timestamp}_$label.jpg")
                 put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
                 put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CameraAgent")
             }
             photoUri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                 ?: error("无法创建相册项目")
-            val outputStream = contentResolver.openOutputStream(photoUri, "w")
-                ?: error("无法写入相册项目")
-            outputStream.use { destination -> outputFile.inputStream().use { source -> source.copyTo(destination) } }
-            val status = when {
-                styleProcessingFailed -> "影调处理失败，已保存原片"
-                style == ColorStyle.NATURAL -> "照片已保存到 Pictures/CameraAgent"
-                else -> "已应用${style.displayName}影调并保存照片"
-            }
-            runOnUiThread { showStatus(status) }
+            val output = contentResolver.openOutputStream(photoUri, "w") ?: error("无法写入相册项目")
+            output.use { destination -> file.inputStream().use { source -> source.copyTo(destination) } }
+            showStatus("已保存${label}到 Pictures/CameraAgent")
         } catch (error: Exception) {
             photoUri?.let { contentResolver.delete(it, null, null) }
-            runOnUiThread { showStatus("照片保存失败：${error.localizedMessage ?: "未知错误"}") }
-        } finally {
-            capturedFile.delete()
-            processedFile.delete()
+            showStatus("照片保存失败：${error.localizedMessage ?: "未知错误"}")
         }
     }
 
