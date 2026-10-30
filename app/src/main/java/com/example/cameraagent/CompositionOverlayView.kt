@@ -24,6 +24,7 @@ class CompositionOverlayView(context: Context) : View(context) {
     private var faceBounds: RectF? = null
     private var imageAspectRatio = 1f
     private var colorStyle = ColorStyle.NATURAL
+    private var previewTintOverride: Int? = null
 
     fun updateAssessment(assessment: SceneAssessment?, style: ColorStyle) {
         faceBounds = assessment?.faceBounds
@@ -37,10 +38,16 @@ class CompositionOverlayView(context: Context) : View(context) {
         invalidate()
     }
 
+    fun setPreviewTint(color: Int) {
+        previewTintOverride = color
+        invalidate()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        if ((colorStyle.previewTint ushr 24) > 0) {
-            tintPaint.color = colorStyle.previewTint
+        val previewTint = previewTintOverride ?: colorStyle.previewTint
+        if ((previewTint ushr 24) > 0) {
+            tintPaint.color = previewTint
             tintPaint.style = Paint.Style.FILL
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), tintPaint)
         }

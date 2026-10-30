@@ -19,6 +19,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
+import android.widget.HorizontalScrollView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
@@ -69,6 +70,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var controlsPanel: View
     private lateinit var agentCircleButton: View
     private lateinit var shutterButton: View
+    private lateinit var presetPreviewStrip: LinearLayout
     private lateinit var agentConfigStore: AgentConfigStore
     private lateinit var photoPresetStore: PhotoPresetStore
     private lateinit var baseUrlEditText: EditText
@@ -95,6 +97,7 @@ class MainActivity : ComponentActivity() {
     private var selectedColorStyle = ColorStyle.NATURAL
     private var selectedPresetId = "natural"
     private var selectedPresetAmount = 0
+    private var appliedPreviewSignature: String? = null
     private var activeTab = "home"
     private var settingsPage: View? = null
     private var recommendedColorStyle = ColorStyle.NATURAL
@@ -157,7 +160,7 @@ class MainActivity : ComponentActivity() {
         contentHost.addView(pageHost, android.widget.FrameLayout.LayoutParams(-1, -1))
 
         previewView = PreviewView(this).apply {
-            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
         compositionOverlay = CompositionOverlayView(this)
@@ -382,10 +385,16 @@ class MainActivity : ComponentActivity() {
             leftMargin = dp(28)
         })
 
-        cameraContent.addView(
-            bottomBar,
-            android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM),
-        )
+        val bottomControls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                orientation = android.graphics.drawable.GradientDrawable.Orientation.BOTTOM_TOP
+                colors = intArrayOf(0xdd000000.toInt(), 0x00000000)
+            }
+        }
+        bottomControls.addView(createPresetPreviewStrip(), LinearLayout.LayoutParams(-1, dp(44)))
+        bottomControls.addView(bottomBar, LinearLayout.LayoutParams(-1, -2))
+        cameraContent.addView(bottomControls, android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
 
         val tabBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -434,7 +443,7 @@ class MainActivity : ComponentActivity() {
         }
         val scroll = ScrollView(this).apply { addView(content) }
         content.addView(settingHeading("风格预设"))
-        content.addView(settingDescription("调整影调和照片参数。所有调整都从原片重新生成；拍摄后可比较并保存成片或原片。"))
+        content.addView(settingDescription("调整影调和照片参数。取景页可实时预览，拍摄后可微调强度；预览与成片的高光、阴影和设备处理可能略有差异。"))
 
         val presetStrip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         photoPresetStore.allPresets().forEach { preset ->
@@ -466,6 +475,7 @@ class MainActivity : ComponentActivity() {
                     selectedPresetAmount = progress
                     photoPresetStore.setAmount(selectedPresetId, progress)
                     selectedLabel.text = "${selected.name} · $progress%"
+                    refreshPresetPreview()
                 }
                 override fun onStartTrackingTouch(bar: SeekBar?) = Unit
                 override fun onStopTrackingTouch(bar: SeekBar?) = Unit
@@ -598,6 +608,7 @@ class MainActivity : ComponentActivity() {
                     val adjusted = minValue + (maxValue - minValue) * progress / max.toFloat()
                     valueLabel.text = "$label  ${"%.2f".format(Locale.US, adjusted)}"
                     onChanged(adjusted)
+                    refreshPresetPreview()
                 }
                 override fun onStartTrackingTouch(bar: SeekBar?) = Unit
                 override fun onStopTrackingTouch(bar: SeekBar?) = Unit
@@ -621,6 +632,7 @@ class MainActivity : ComponentActivity() {
                 selectedPresetAmount,
                 recipe,
             )
+            rebuildPresetPreviewStrip()
             selectPreset(preset.id)
             dialog.dismiss()
         }
@@ -635,6 +647,7 @@ class MainActivity : ComponentActivity() {
                     android.app.AlertDialog.Builder(this).setTitle("重命名预设").setView(input)
                         .setPositiveButton("保存") { _, _ ->
                             photoPresetStore.renameCustomPreset(preset.id, input.text.toString())
+                            rebuildPresetPreviewStrip()
                             switchTab("presets")
                         }.setNegativeButton("取消", null).show()
                 } else {
@@ -648,6 +661,7 @@ class MainActivity : ComponentActivity() {
                                 selectedPresetAmount = photoPresetStore.amount("natural")
                                 manualColorOverride = false
                             }
+                            rebuildPresetPreviewStrip()
                             switchTab("presets")
                         }.setNegativeButton("取消", null).show()
                 }
@@ -656,7 +670,7 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
-    private fun selectPreset(id: String) {
+    private fun selectPreset(id: String, navigateToPresets: Boolean = true) {
         val preset = photoPresetStore.find(id) ?: return
         if (autoModeEnabled) toggleAutoMode()
         selectedPresetId = id
@@ -666,8 +680,9 @@ class MainActivity : ComponentActivity() {
         photoPresetStore.markRecent(id)
         manualColorOverride = true
         updateColorStyleButton()
+        rebuildPresetPreviewStrip()
         latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
-        switchTab("presets")
+        if (navigateToPresets) switchTab("presets")
     }
 
     private fun createAgentSettingsPage(): View {
@@ -1514,6 +1529,7 @@ class MainActivity : ComponentActivity() {
         photoPresetStore.markRecent(selectedPresetId)
         manualColorOverride = true
         updateColorStyleButton()
+        animatePresetSelection()
         latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
     }
 
@@ -1532,6 +1548,92 @@ class MainActivity : ComponentActivity() {
             quickColorButton.isEnabled = !autoModeEnabled
             quickColorButton.text = selectedPresetName
         }
+        refreshPresetPreview()
+    }
+
+    private fun refreshPresetPreview() {
+        if (!::previewView.isInitialized || !::compositionOverlay.isInitialized || !::photoPresetStore.isInitialized) return
+        val preset = photoPresetStore.find(selectedPresetId) ?: PhotoPresets.all.first()
+        val recipe = photoPresetStore.recipe(preset.id)
+        val signature = "${preset.id}:${selectedPresetAmount}:$recipe"
+        if (signature == appliedPreviewSignature) return
+        val hardwareEffectApplied = PresetPreviewEffect.apply(previewView, preset, recipe, selectedPresetAmount)
+        compositionOverlay.setPreviewTint(
+            if (hardwareEffectApplied) Color.TRANSPARENT
+            else PresetPreviewEffect.fallbackTint(preset, recipe, selectedPresetAmount),
+        )
+        appliedPreviewSignature = signature
+        updatePresetPreviewStripSelection()
+    }
+
+    private fun createPresetPreviewStrip(): View {
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+            setPadding(dp(14), dp(2), dp(14), dp(2))
+        }
+        presetPreviewStrip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        scroll.addView(presetPreviewStrip, android.widget.FrameLayout.LayoutParams(-2, -1))
+        rebuildPresetPreviewStrip()
+        return scroll
+    }
+
+    private fun rebuildPresetPreviewStrip() {
+        if (!::presetPreviewStrip.isInitialized) return
+        presetPreviewStrip.removeAllViews()
+        photoPresetStore.allPresets().forEach { preset ->
+            presetPreviewStrip.addView(TextView(this).apply {
+                tag = preset.id
+                text = preset.name
+                textSize = 12f
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                setBackgroundResource(
+                    if (preset.id == selectedPresetId) R.drawable.bg_glass_card else R.drawable.bg_glass_button,
+                )
+                contentDescription = "预览${preset.name}预设"
+                setOnClickListener {
+                    selectPreset(preset.id, navigateToPresets = false)
+                    animatePresetSelection()
+                }
+            }, LinearLayout.LayoutParams(-2, dp(36)).apply { rightMargin = dp(7) })
+        }
+    }
+
+    private fun updatePresetPreviewStripSelection() {
+        if (!::presetPreviewStrip.isInitialized) return
+        for (index in 0 until presetPreviewStrip.childCount) {
+            val chip = presetPreviewStrip.getChildAt(index) as? TextView ?: continue
+            chip.setBackgroundResource(
+                if (chip.tag == selectedPresetId) R.drawable.bg_glass_card else R.drawable.bg_glass_button,
+            )
+        }
+    }
+
+    private fun animatePresetSelection() {
+        if (!::quickColorButton.isInitialized || android.provider.Settings.Global.getFloat(
+                contentResolver,
+                android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
+                1f,
+            ) == 0f
+        ) return
+        quickColorButton.animate().cancel()
+        quickColorButton.animate()
+            .scaleX(0.94f)
+            .scaleY(0.94f)
+            .setDuration(80)
+            .withEndAction {
+                quickColorButton.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .setDuration(120)
+                    .start()
+            }
+            .start()
     }
 
     private fun applyAutoExposure(offset: Int) {

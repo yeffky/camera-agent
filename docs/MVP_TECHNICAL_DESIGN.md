@@ -128,6 +128,13 @@ CameraX Preview / ImageCapture / ImageAnalysis
 - 拍摄后可预览和比较原片/成片，并分别保存。
 - 手动 ISO、曝光时间、白平衡、手动焦距及其他 Camera2 高级控制不在本阶段范围内。
 
+### 阶段 G：拍前预设预览（实现完成；真机流畅度验收待做）
+
+- 取景页增加横向预设选择栏；切换时使用当前本地预设和强度更新预览，不重绑 CameraX 用例。
+- Android 12 及以上使用 `PreviewView` 兼容渲染模式和 GPU 颜色矩阵；Android 10/11 使用轻量色调覆盖提示。
+- 预览不模拟逐像素高光/阴影曲线和厂商 ISP；成片仍由 `PhotoColorProcessor` 完整处理，需在真机检查预览与成片差异和流畅度。
+- 详细需求见 [OpenSpec：preset-live-preview](../openspec/changes/preset-live-preview/proposal.md)。
+
 ## 7. 验收标准
 
 - 无 root，使用公开 Android 相机 API。
