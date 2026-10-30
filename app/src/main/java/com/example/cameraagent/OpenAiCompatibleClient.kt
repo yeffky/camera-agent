@@ -78,7 +78,19 @@ data class CameraAdvice(
     val summary: String,
     val rationale: String,
     val actions: List<CameraAdviceAction>,
+    val cropRect: NormalizedCropRect? = null,
 )
+
+data class NormalizedCropRect(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+) {
+    val width: Float get() = right - left
+    val height: Float get() = bottom - top
+    val area: Float get() = width * height
+}
 
 object CameraAdviceParser {
     fun parse(response: String): CameraAdvice {
@@ -91,7 +103,10 @@ object CameraAdviceParser {
             .getOrElse { throw CloudApiException("无法解析云端建议 JSON") }
         val rawActions = json.optJSONArray("suggestions")
             ?: throw CloudApiException("云端建议缺少 suggestions 数组")
-        if (rawActions.length() > MAX_ACTIONS) throw CloudApiException("云端建议项过多")
+        val hasCrop = json.opt("crop_rect")?.let { it != JSONObject.NULL } == true
+        if (rawActions.length() + (if (hasCrop) 1 else 0) > MAX_ACTIONS) {
+            throw CloudApiException("云端建议项过多")
+        }
         val actions = (0 until rawActions.length()).map { index ->
             val item = rawActions.optJSONObject(index)
                 ?: throw CloudApiException("云端建议格式无效")
@@ -130,15 +145,42 @@ object CameraAdviceParser {
                 else -> throw CloudApiException("云端返回了不支持的建议类型")
             }
         }
+        val rawCrop = json.opt("crop_rect")
+        val cropRect = when {
+            rawCrop == null || rawCrop == JSONObject.NULL -> null
+            rawCrop is JSONObject -> parseCropRect(rawCrop)
+            else -> throw CloudApiException("云端裁剪建议格式无效")
+        }
         return CameraAdvice(
             summary = json.optString("summary", "拍摄建议").take(MAX_TEXT_LENGTH),
             rationale = json.optString("rationale", "").take(MAX_RATIONALE_LENGTH),
             actions = actions,
+            cropRect = cropRect,
         )
+    }
+
+    private fun parseCropRect(json: JSONObject): NormalizedCropRect {
+        fun coordinate(name: String): Float {
+            val value = json.optDouble(name, Double.NaN)
+            if (!value.isFinite() || value !in 0.0..1.0) throw CloudApiException("云端裁剪坐标无效")
+            return value.toFloat()
+        }
+        val rect = NormalizedCropRect(
+            left = coordinate("left"),
+            top = coordinate("top"),
+            right = coordinate("right"),
+            bottom = coordinate("bottom"),
+        )
+        if (rect.width < MIN_CROP_EDGE || rect.height < MIN_CROP_EDGE || rect.area < MIN_CROP_AREA) {
+            throw CloudApiException("云端裁剪区域过小")
+        }
+        return rect
     }
 
     private const val MAX_ACTIONS = 8
     private const val MAX_TEXT_LENGTH = 200
     private const val MAX_RATIONALE_LENGTH = 400
+    private const val MIN_CROP_EDGE = 0.15f
+    private const val MIN_CROP_AREA = 0.08f
     private val COLOR_STYLES = ColorStyle.values().map { it.name }.toSet()
 }

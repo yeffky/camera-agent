@@ -50,8 +50,14 @@ The app SHALL apply only known, fresh, device-supported camera actions within cl
 
 #### Scenario: Response contains an unsupported action
 
-- **WHEN** the response contains an unknown or unsupported camera action
+- **WHEN** the response contains a known action that the current device does not support
 - **THEN** the app skips that action, preserves the current camera state, and reports the result.
+
+#### Scenario: Response contains an unknown action kind
+
+- **WHEN** the response contains an action kind outside the client allowlist
+- **THEN** the client rejects the response without applying its actions
+- **AND** reports that the cloud response is invalid.
 
 ### Requirement: Cloud errors preserve ordinary capture
 
@@ -63,3 +69,19 @@ The app SHALL preserve ordinary camera capture when the AI service is unavailabl
 - **THEN** the app shows that AI is unavailable
 - **AND** ordinary camera capture remains available
 - **AND** the failed request does not trigger automatic capture.
+
+### Requirement: Crop suggestion is visible in the current camera screen
+
+The app SHALL display a validated crop suggestion on the current camera screen before the cropped photo is captured.
+
+#### Scenario: AI crop is inside the visible preview
+
+- **WHEN** a valid crop rectangle maps fully inside the current PreviewView content
+- **THEN** the app animates a crop frame over the viewfinder
+- **AND** the user can see the frame before using the shutter.
+
+#### Scenario: AI crop falls outside the visible preview
+
+- **WHEN** the suggested crop cannot be shown faithfully inside the current PreviewView content
+- **THEN** the app skips that crop suggestion
+- **AND** automatic capture is not triggered.

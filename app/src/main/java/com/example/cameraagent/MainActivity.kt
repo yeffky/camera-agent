@@ -51,6 +51,8 @@ private data class AgentApplySnapshot(
     val manualColorOverride: Boolean,
     val presetId: String,
     val presetAmount: Int,
+    val cropRect: NormalizedCropRect?,
+    val cropAspectRatio: Float,
 )
 
 class MainActivity : ComponentActivity() {
@@ -71,6 +73,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var agentCircleButton: View
     private lateinit var shutterButton: View
     private lateinit var presetPreviewStrip: LinearLayout
+    private lateinit var cameraAdvicePanel: LinearLayout
+    private lateinit var cameraAdviceText: TextView
+    private lateinit var cameraAutoCaptureButton: Button
+    private lateinit var cameraUndoButton: Button
     private lateinit var agentConfigStore: AgentConfigStore
     private lateinit var photoPresetStore: PhotoPresetStore
     private lateinit var baseUrlEditText: EditText
@@ -98,6 +104,11 @@ class MainActivity : ComponentActivity() {
     private var selectedPresetId = "natural"
     private var selectedPresetAmount = 0
     private var appliedPreviewSignature: String? = null
+    private var activeAiCropRect: NormalizedCropRect? = null
+    private var activeAiCropAspectRatio = 1f
+    private var latestCloudAdviceAspectRatio = 1f
+    private var photoCaptureInProgress = false
+    private var captureAutomaticallyAfterAi = false
     private var activeTab = "home"
     private var settingsPage: View? = null
     private var recommendedColorStyle = ColorStyle.NATURAL
@@ -133,6 +144,8 @@ class MainActivity : ComponentActivity() {
         selectedColorStyle = photoPresetStore.find(selectedPresetId)?.style ?: ColorStyle.NATURAL
         selectedPresetAmount = photoPresetStore.amount(selectedPresetId)
         manualColorOverride = selectedPresetId != "natural"
+        captureAutomaticallyAfterAi = getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
+            .getBoolean(KEY_AUTO_CAPTURE_AFTER_AI, false)
         setContentView(createCameraScreen())
 
         if (hasCameraPermission()) startCamera() else requestCameraPermission.launch(Manifest.permission.CAMERA)
@@ -202,6 +215,50 @@ class MainActivity : ComponentActivity() {
         )
 
         cameraContent.addView(topBar, android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+
+        cameraAdvicePanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setBackgroundResource(R.drawable.bg_glass_card)
+            visibility = View.GONE
+        }
+        cameraAdviceText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            maxLines = 4
+        }
+        cameraAdvicePanel.addView(cameraAdviceText, matchWidthWrapHeight())
+        val adviceActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        cameraAutoCaptureButton = Button(this).apply {
+            setTextColor(Color.WHITE)
+            setBackgroundResource(R.drawable.bg_glass_button)
+            setOnClickListener {
+                captureAutomaticallyAfterAi = !captureAutomaticallyAfterAi
+                getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE).edit()
+                    .putBoolean(KEY_AUTO_CAPTURE_AFTER_AI, captureAutomaticallyAfterAi).apply()
+                updateCameraAutoCaptureButton()
+                showStatus(if (captureAutomaticallyAfterAi) "AI 建议成功应用后将自动拍摄" else "AI 调整后由你按快门")
+            }
+        }
+        updateCameraAutoCaptureButton()
+        cameraUndoButton = Button(this).apply {
+            text = "撤销 AI 调整"
+            setTextColor(Color.WHITE)
+            setBackgroundResource(R.drawable.bg_glass_button)
+            visibility = View.GONE
+            setOnClickListener { undoLastCloudAdvice() }
+        }
+        adviceActions.addView(cameraAutoCaptureButton, LinearLayout.LayoutParams(0, dp(38), 1f).apply {
+            rightMargin = dp(6)
+        })
+        adviceActions.addView(cameraUndoButton, LinearLayout.LayoutParams(0, dp(38), 1f))
+        cameraAdvicePanel.addView(adviceActions, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        cameraContent.addView(cameraAdvicePanel, android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply {
+            setMargins(dp(16), dp(96), dp(16), 0)
+        })
 
         // 4. 左上角浮动“调控面板”（Controls Panel）
         controlsPanel = LinearLayout(this).apply {
@@ -371,13 +428,13 @@ class MainActivity : ComponentActivity() {
         // Agent 功能圆形按钮（与拍摄按钮并排）
         agentCircleButton = android.widget.FrameLayout(this).apply {
             setBackgroundResource(R.drawable.bg_agent_circle)
+            contentDescription = "AI 拍摄建议"
             val icon = android.widget.ImageView(context).apply {
                 setImageResource(R.drawable.ic_agent_sparkle)
                 setPadding(dp(12), dp(12), dp(12), dp(12))
             }
             addView(icon, android.widget.FrameLayout.LayoutParams(-1, -1))
             setOnClickListener {
-                switchTab("settings")
                 sendCloudRequest()
             }
         }
@@ -930,6 +987,7 @@ class MainActivity : ComponentActivity() {
     private fun buildAgentRequestBody(
         config: AgentApiConfig,
         imageDataUrl: String? = null,
+        imageAspectRatio: Float? = null,
         includeImagePlaceholder: Boolean = false,
     ): JSONObject {
         val assessment = latestAssessment
@@ -961,6 +1019,7 @@ class MainActivity : ComponentActivity() {
         supportedControls.put("composition")
         val capabilities = JSONObject()
             .put("supported_controls", supportedControls)
+            .put("supports_crop_output", true)
         if (zoomState != null && zoomState.maxZoomRatio > zoomState.minZoomRatio) {
             capabilities.put(
                 "zoom_ratio_range",
@@ -979,7 +1038,15 @@ class MainActivity : ComponentActivity() {
             .put("scene", scene)
             .put("current_controls", currentControls)
             .put("device_capabilities", capabilities)
-            .put("request", "结合本条消息附带的当前取景图片与相机状态，给出构图、色彩和参数建议；仅建议设备支持范围内的动作，不要执行操作。")
+            .put("request", "结合本条消息附带的当前取景图片与相机状态，给出构图、色彩和参数建议。若画面边缘有干扰物，可建议裁剪框；仅建议设备支持范围内的动作，不要执行操作。")
+        imageAspectRatio?.takeIf { it.isFinite() && it > 0f }?.let { aspect ->
+            userContent.put(
+                "frame_geometry",
+                JSONObject()
+                    .put("coordinate_space", "upright_non_mirrored_image")
+                    .put("aspect_ratio", aspect.toDouble()),
+            )
+        }
         val userMessageContent = if (imageDataUrl != null || includeImagePlaceholder) {
             JSONArray()
                 .put(JSONObject().put("type", "text").put("text", userContent.toString()))
@@ -1004,7 +1071,8 @@ class MainActivity : ComponentActivity() {
                     .put(
                         "content",
             "你是拍摄参数建议助手。只返回 JSON 对象，不要 Markdown。格式为 " +
-                            "{summary:string,rationale:string,suggestions:[{kind:string,value:number|string}]}。" +
+                            "{schema_version:1,summary:string,rationale:string,crop_rect:null|{left:number,top:number,right:number,bottom:number},suggestions:[{kind:string,value:number|string}]}。" +
+                            "crop_rect 使用 0 到 1 的归一化坐标，基于 upright_non_mirrored_image；只在确实需要重新构图时返回，否则为 null。" +
                             "kind 仅可为 exposure_ev（目标曝光补偿 EV）、zoom_ratio（目标倍率）、" +
                             "color_style（NATURAL/WARM/SOFT/VIVID/COOL/MONOCHROME）、" +
                             "preset_id（本地预设 ID）或 preset_strength（0 到 100）或 composition（构图提示）。" +
@@ -1046,6 +1114,8 @@ class MainActivity : ComponentActivity() {
 
     private fun sendCloudRequest() {
         if (cloudRequestInFlight || cloudAdviceApplying) return
+        if (settingsPage == null) settingsPage = createAgentSettingsPage()
+        if (::controlsPanel.isInitialized) controlsPanel.visibility = View.GONE
         val config = readAgentConfig() ?: return
         val typedApiKey = if (::apiKeyEditText.isInitialized) apiKeyEditText.text.toString() else ""
         val apiKey = typedApiKey.ifBlank { agentConfigStore.loadApiKey().orEmpty() }
@@ -1066,10 +1136,12 @@ class MainActivity : ComponentActivity() {
             showAgentConfigStatus("配置或 API Key 保存失败；请求未发送")
             return
         }
+        switchTab("home")
         updateRequestPreview(config, buildAgentRequestBody(config, includeImagePlaceholder = true))
         latestCloudAdvice = null
         val requestSceneName = latestAssessment?.sceneName
         if (::cloudAdviceText.isInitialized) cloudAdviceText.text = "正在采集一张当前取景帧，然后请求云端建议…"
+        showCameraAdvice("正在分析当前取景画面…")
         cloudRequestInFlight = true
         if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = false
         showStatus("正在发送取景帧给 AI...")
@@ -1079,7 +1151,15 @@ class MainActivity : ComponentActivity() {
                 cloudApiExecutor.execute {
                     try {
                         val imageDataUrl = CloudImageEncoder.encodeJpegDataUrl(image)
-                        val requestBody = buildAgentRequestBody(config, imageDataUrl = imageDataUrl)
+                        val rotation = image.imageInfo.rotationDegrees % 180 != 0
+                        val uprightWidth = if (rotation) image.height else image.width
+                        val uprightHeight = if (rotation) image.width else image.height
+                        val imageAspectRatio = uprightWidth.toFloat() / uprightHeight.coerceAtLeast(1)
+                        val requestBody = buildAgentRequestBody(
+                            config,
+                            imageDataUrl = imageDataUrl,
+                            imageAspectRatio = imageAspectRatio,
+                        )
                         val content = OpenAiCompatibleClient().complete(config, apiKey, requestBody)
                         val advice = CameraAdviceParser.parse(content)
                         runOnUiThread {
@@ -1088,6 +1168,7 @@ class MainActivity : ComponentActivity() {
                             latestCloudAdvice = advice
                             latestCloudAdviceAtMs = SystemClock.elapsedRealtime()
                             latestCloudAdviceSceneName = requestSceneName
+                            latestCloudAdviceAspectRatio = imageAspectRatio
                             applyCloudAdvice(advice)
                             latestCloudAdvice = null
                         }
@@ -1096,6 +1177,7 @@ class MainActivity : ComponentActivity() {
                             cloudRequestInFlight = false
                             if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
                             if (::cloudAdviceText.isInitialized) cloudAdviceText.text = "未能获取建议：${error.message ?: "网络或响应错误"}"
+                            showCameraAdvice("AI 暂不可用\n${error.message ?: "网络或响应错误"}")
                             showStatus("请求失败：${error.message ?: "网络或响应错误"}")
                         }
                     } finally {
@@ -1109,6 +1191,7 @@ class MainActivity : ComponentActivity() {
                     cloudRequestInFlight = false
                     if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
                     if (::cloudAdviceText.isInitialized) cloudAdviceText.text = "未能采集当前取景帧：${exception.message ?: "相机拍摄错误"}"
+                    showCameraAdvice("AI 暂不可用\n未能采集当前取景画面。普通相机仍可拍摄。")
                     showStatus("没有发送网络请求；相机拍摄错误")
                 }
             }
@@ -1117,6 +1200,7 @@ class MainActivity : ComponentActivity() {
             cloudRequestInFlight = false
             sendCloudRequestButton.isEnabled = true
             cloudAdviceText.text = "未能开始采集取景帧：${error.message ?: "相机错误"}"
+            showCameraAdvice("AI 暂不可用\n未能开始分析当前取景画面。普通相机仍可拍摄。")
             showAgentConfigStatus("没有发送网络请求；请重新打开取景后重试")
         }
     }
@@ -1124,8 +1208,9 @@ class MainActivity : ComponentActivity() {
     private fun formatCloudAdvice(advice: CameraAdvice): String = buildString {
         append(advice.summary)
         if (advice.rationale.isNotBlank()) append("\n理由：${advice.rationale}")
+        advice.cropRect?.let { append("\nAI 建议了新的取景区域，可在画面边框中查看。") }
         if (advice.actions.isEmpty()) {
-            append("\n没有可应用的参数建议。")
+            if (advice.cropRect == null) append("\n没有可应用的参数建议。")
         } else {
             append("\n\n建议：")
             advice.actions.forEach { action ->
@@ -1151,11 +1236,13 @@ class MainActivity : ComponentActivity() {
     private fun applyCloudAdvice(advice: CameraAdvice) {
         if (isCloudAdviceStale()) {
             cloudAdviceText.text = formatCloudAdvice(advice) + "\n\n场景已变化或建议已过期，没有应用参数；请重新请求。"
+            showCameraAdvice("AI 建议已过期\n请重新分析当前画面。普通相机仍可拍摄。")
             showAgentConfigStatus("云端建议已过期，没有应用参数")
             return
         }
         val activeCamera = camera ?: run {
             showAgentConfigStatus("相机尚未就绪，建议没有应用")
+            showCameraAdvice("相机尚未就绪，AI 建议没有应用。")
             return
         }
         val exposureState = activeCamera.cameraInfo.exposureState
@@ -1167,9 +1254,15 @@ class MainActivity : ComponentActivity() {
             manualColorOverride = manualColorOverride,
             presetId = selectedPresetId,
             presetAmount = selectedPresetAmount,
+            cropRect = activeAiCropRect,
+            cropAspectRatio = activeAiCropAspectRatio,
         )
         val outcomes = mutableListOf<String>()
-        var pendingActions = advice.actions.size
+        val cropStateChanges = advice.cropRect != null || activeAiCropRect != null
+        val cropFullyVisible = advice.cropRect?.let {
+            compositionOverlay.isCropFullyVisible(it, latestCloudAdviceAspectRatio)
+        } ?: true
+        var pendingActions = advice.actions.size + if (cropStateChanges) 1 else 0
         var appliedCount = 0
         var skippedCount = 0
         var failedCount = 0
@@ -1177,11 +1270,16 @@ class MainActivity : ComponentActivity() {
         latestAgentApplySnapshot = snapshot
         undoCloudAdviceButton.visibility = View.VISIBLE
         undoCloudAdviceButton.isEnabled = false
+        cameraUndoButton.visibility = View.VISIBLE
+        cameraUndoButton.isEnabled = false
         cloudAdviceText.text = formatCloudAdvice(advice) + "\n\n正在应用建议…"
+        showCameraAdvice("${advice.summary}\n正在应用支持的相机参数与取景建议…")
         if (pendingActions == 0) {
             undoCloudAdviceButton.visibility = View.GONE
+            cameraUndoButton.visibility = View.GONE
             latestAgentApplySnapshot = null
             cloudAdviceText.append("\n没有可应用的参数建议。")
+            showCameraAdvice("${advice.summary}\n没有可应用的参数建议。普通相机仍可拍摄。")
             showAgentConfigStatus("云端没有返回可应用的参数")
             return
         }
@@ -1197,12 +1295,25 @@ class MainActivity : ComponentActivity() {
                 cloudAdviceApplying = false
                 if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
                 undoCloudAdviceButton.isEnabled = appliedCount > 0
+                cameraUndoButton.isEnabled = appliedCount > 0
                 if (appliedCount == 0) {
                     undoCloudAdviceButton.visibility = View.GONE
+                    cameraUndoButton.visibility = View.GONE
                     latestAgentApplySnapshot = null
                 }
                 val summary = "执行结果：已应用 $appliedCount 项，跳过 $skippedCount 项，失败 $failedCount 项；构图提示 $compositionHintCount 条。"
                 cloudAdviceText.text = formatCloudAdvice(advice) + "\n\n" + summary + outcomes.joinToString(separator = "\n• ", prefix = "\n• ")
+                cameraAdviceText.text = formatCloudAdvice(advice) + "\n" + summary
+                if (captureAutomaticallyAfterAi && appliedCount > 0 && skippedCount == 0 && failedCount == 0) {
+                    cameraAdviceText.append("\n即将按当前裁剪结果自动拍摄…")
+                    cameraContent.postDelayed({
+                        if (captureAutomaticallyAfterAi && cameraContent.isShown && hasWindowFocus() &&
+                            !photoCaptureInProgress && !cloudAdviceApplying
+                        ) {
+                            takePhoto(activeAiCropRect)
+                        }
+                    }, AUTO_CAPTURE_PREVIEW_DELAY_MS)
+                }
                 if (::credentialStatusText.isInitialized) credentialStatusText.text = summary
                 showAgentConfigStatus(summary)
             }
@@ -1297,12 +1408,36 @@ class MainActivity : ComponentActivity() {
                         val amount = action.numberValue?.roundToInt()?.coerceIn(0, 100) ?: selectedPresetAmount
                         selectedPresetAmount = amount
                         photoPresetStore.setAmount(selectedPresetId, amount)
+                        updateColorStyleButton()
                         recordOutcome("${photoPresetStore.find(selectedPresetId)?.name ?: "风格预设"} 强度：$amount%", applied = true)
                     }
                 }
                 "composition" -> {
                     compositionHintCount++
                     recordOutcome("构图建议：${action.textValue}", applied = false)
+                }
+            }
+        }
+        if (cropStateChanges) {
+            when {
+                advice.cropRect != null && cropFullyVisible -> {
+                    activeAiCropRect = advice.cropRect
+                    activeAiCropAspectRatio = latestCloudAdviceAspectRatio
+                    compositionOverlay.setAiCropRect(advice.cropRect, activeAiCropAspectRatio)
+                    compositionOverlay.visibility = View.VISIBLE
+                    recordOutcome("AI 取景裁剪：已在取景框显示", applied = true)
+                }
+                advice.cropRect != null -> {
+                    activeAiCropRect = null
+                    compositionOverlay.setAiCropRect(null, activeAiCropAspectRatio)
+                    compositionOverlay.visibility = if (guideEnabled) View.VISIBLE else View.GONE
+                    recordOutcome("AI 取景裁剪：超出当前可见取景区域，已跳过", applied = false, skipped = true)
+                }
+                else -> {
+                    activeAiCropRect = null
+                    compositionOverlay.setAiCropRect(null, activeAiCropAspectRatio)
+                    compositionOverlay.visibility = if (guideEnabled) View.VISIBLE else View.GONE
+                    recordOutcome("AI 取景裁剪：已恢复完整取景", applied = true)
                 }
             }
         }
@@ -1315,6 +1450,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         undoCloudAdviceButton.isEnabled = false
+        cameraUndoButton.isEnabled = false
         cloudAdviceApplying = true
         if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = false
         var pendingRestores = 0
@@ -1325,13 +1461,16 @@ class MainActivity : ComponentActivity() {
             if (failedRestores == 0) {
                 latestAgentApplySnapshot = null
                 undoCloudAdviceButton.visibility = View.GONE
+                cameraUndoButton.visibility = View.GONE
                 cloudAdviceApplying = false
                 if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
+                showCameraAdvice("已撤销上次 AI 调整。")
                 showAgentConfigStatus("已撤销上次 AI 调整")
             } else {
                 cloudAdviceApplying = false
                 if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
                 undoCloudAdviceButton.isEnabled = true
+                cameraUndoButton.isEnabled = true
                 showAgentConfigStatus("撤销未完全成功；可重试，失败 $failedRestores 项")
             }
         }
@@ -1370,6 +1509,10 @@ class MainActivity : ComponentActivity() {
         photoPresetStore.setSelectedId(selectedPresetId)
         selectedPresetAmount = snapshot.presetAmount
         photoPresetStore.setAmount(selectedPresetId, selectedPresetAmount)
+        activeAiCropRect = snapshot.cropRect
+        activeAiCropAspectRatio = snapshot.cropAspectRatio
+        compositionOverlay.setAiCropRect(snapshot.cropRect, snapshot.cropAspectRatio, animate = false)
+        compositionOverlay.visibility = if (guideEnabled || snapshot.cropRect != null) View.VISIBLE else View.GONE
         updateColorStyleButton()
         latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
         restoreSchedulingComplete = true
@@ -1614,6 +1757,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun updateCameraAutoCaptureButton() {
+        if (::cameraAutoCaptureButton.isInitialized) {
+            cameraAutoCaptureButton.text = if (captureAutomaticallyAfterAi) "AI 后自动拍摄：开" else "AI 后自动拍摄：关"
+        }
+    }
+
+    private fun showCameraAdvice(message: String, show: Boolean = true) {
+        if (!::cameraAdvicePanel.isInitialized || !::cameraAdviceText.isInitialized) return
+        cameraAdviceText.text = message
+        if (show && cameraAdvicePanel.visibility != View.VISIBLE) {
+            cameraAdvicePanel.alpha = 0f
+            cameraAdvicePanel.visibility = View.VISIBLE
+            cameraAdvicePanel.animate().alpha(1f).setDuration(CAMERA_ADVICE_FADE_DURATION_MS).start()
+        } else if (!show) {
+            cameraAdvicePanel.visibility = View.GONE
+        }
+    }
+
     private fun animatePresetSelection() {
         if (!::quickColorButton.isInitialized || android.provider.Settings.Global.getFloat(
                 contentResolver,
@@ -1762,11 +1923,14 @@ class MainActivity : ComponentActivity() {
         exposureLabel.text = "曝光 ${if (ev > 0) "+" else ""}${"%.1f".format(Locale.US, ev)} EV"
     }
 
-    private fun takePhoto() {
+    private fun takePhoto(cropRect: NormalizedCropRect? = activeAiCropRect) {
+        if (photoCaptureInProgress) return
         val capture = imageCapture ?: run {
             showStatus("相机尚未就绪")
             return
         }
+        photoCaptureInProgress = true
+        shutterButton.isEnabled = false
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val capturedFile = File(cacheDir, "capture_$timestamp.jpg")
         val presetAtCapture = (photoPresetStore.find(selectedPresetId) ?: PhotoPresets.all.first())
@@ -1777,24 +1941,70 @@ class MainActivity : ComponentActivity() {
         capture.takePicture(output, cameraExecutor, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                 photoProcessingExecutor.execute {
-                    prepareCapturedPhoto(capturedFile, timestamp, presetAtCapture, amountAtCapture)
+                    prepareCapturedPhoto(capturedFile, timestamp, presetAtCapture, amountAtCapture, cropRect)
                 }
             }
 
             override fun onError(exception: ImageCaptureException) {
                 capturedFile.delete()
-                runOnUiThread { showStatus("拍摄失败：${exception.localizedMessage ?: "未知错误"}") }
+                runOnUiThread {
+                    photoCaptureInProgress = false
+                    shutterButton.isEnabled = true
+                    showStatus("拍摄失败：${exception.localizedMessage ?: "未知错误"}")
+                }
             }
         })
     }
 
-    private fun prepareCapturedPhoto(capturedFile: File, timestamp: String, preset: PhotoPreset, amount: Int) {
+    private fun prepareCapturedPhoto(
+        capturedFile: File,
+        timestamp: String,
+        preset: PhotoPreset,
+        amount: Int,
+        cropRect: NormalizedCropRect?,
+    ) {
+        var photoInputFile = capturedFile
+        val croppedOnly = cropRect != null
+        if (cropRect != null) {
+            val croppedFile = File(cacheDir, "cropped_$timestamp.jpg")
+            try {
+                PhotoCropProcessor.crop(capturedFile, croppedFile, cropRect)
+                capturedFile.delete()
+                photoInputFile = croppedFile
+            } catch (error: Exception) {
+                capturedFile.delete()
+                croppedFile.delete()
+                runOnUiThread {
+                    activeAiCropRect = null
+                    compositionOverlay.setAiCropRect(null, activeAiCropAspectRatio)
+                    compositionOverlay.visibility = if (guideEnabled) View.VISIBLE else View.GONE
+                    photoCaptureInProgress = false
+                    shutterButton.isEnabled = true
+                    showCameraAdvice("AI 裁剪无法完成，未保存未裁剪照片。已恢复普通取景，你可以直接拍摄或重新获取建议。")
+                    showStatus("照片裁剪失败：${error.localizedMessage ?: "输出区域无效"}")
+                }
+                return
+            } catch (error: OutOfMemoryError) {
+                capturedFile.delete()
+                croppedFile.delete()
+                runOnUiThread {
+                    activeAiCropRect = null
+                    compositionOverlay.setAiCropRect(null, activeAiCropAspectRatio)
+                    compositionOverlay.visibility = if (guideEnabled) View.VISIBLE else View.GONE
+                    photoCaptureInProgress = false
+                    shutterButton.isEnabled = true
+                    showCameraAdvice("设备内存不足，未保存未裁剪照片。已恢复普通取景，你可以直接拍摄。")
+                    showStatus("设备内存不足，裁剪失败")
+                }
+                return
+            }
+        }
         val processedFile = File(cacheDir, "processed_$timestamp.jpg")
-        var outputFile = capturedFile
+        var outputFile = photoInputFile
         var styleProcessingFailed = false
         if (amount > 0 && (preset.style != ColorStyle.NATURAL || preset.recipe != PhotoRecipe())) {
             try {
-                PhotoColorProcessor.process(capturedFile, processedFile, preset, preset.recipe, amount)
+                PhotoColorProcessor.process(photoInputFile, processedFile, preset, preset.recipe, amount)
                 outputFile = processedFile
             } catch (_: Exception) {
                 styleProcessingFailed = true
@@ -1804,7 +2014,18 @@ class MainActivity : ComponentActivity() {
         }
 
         val previewFile = outputFile
-        runOnUiThread { showCapturePreview(capturedFile, previewFile, processedFile, timestamp, preset, amount, styleProcessingFailed) }
+        runOnUiThread {
+            showCapturePreview(
+                photoInputFile,
+                previewFile,
+                processedFile,
+                timestamp,
+                preset,
+                amount,
+                styleProcessingFailed,
+                croppedOnly,
+            )
+        }
     }
 
     private fun showCapturePreview(
@@ -1815,6 +2036,7 @@ class MainActivity : ComponentActivity() {
         preset: PhotoPreset,
         amount: Int,
         processingFailed: Boolean,
+        croppedOnly: Boolean,
     ) {
         fun previewBitmap(file: File): android.graphics.Bitmap? {
             val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 }
@@ -1828,7 +2050,12 @@ class MainActivity : ComponentActivity() {
             setBackgroundColor(Color.BLACK)
         }
         val title = TextView(this).apply {
-            text = if (processingFailed) "处理失败，当前展示原片" else "成片预览 · ${preset.name} ${amount}%"
+            text = when {
+                processingFailed && croppedOnly -> "裁剪已完成 · 风格处理失败"
+                processingFailed -> "处理失败，当前展示原片"
+                croppedOnly -> "AI 裁剪成片 · ${preset.name} ${amount}%"
+                else -> "成片预览 · ${preset.name} ${amount}%"
+            }
             setTextColor(Color.WHITE)
             textSize = 14f
             setPadding(dp(12), dp(8), dp(12), dp(8))
@@ -1839,7 +2066,7 @@ class MainActivity : ComponentActivity() {
             addView(title)
             addView(image, LinearLayout.LayoutParams(-1, dp(360)))
             addView(Button(this@MainActivity).apply {
-                text = "按住查看原片"
+                text = if (croppedOnly) "按住查看未调色裁剪" else "按住查看原片"
                 setOnTouchListener { _, event ->
                     val showOriginal = event.action == android.view.MotionEvent.ACTION_DOWN
                     image.setImageBitmap(if (showOriginal) originalBitmap else processedBitmap ?: originalBitmap)
@@ -1849,30 +2076,53 @@ class MainActivity : ComponentActivity() {
             }, LinearLayout.LayoutParams(-1, dp(44)))
         }
         val dialog = android.app.AlertDialog.Builder(this)
-            .setTitle("拍摄预览")
+            .setTitle(if (croppedOnly) "AI 裁剪预览" else "拍摄预览")
             .setView(previewContent)
-            .setPositiveButton(if (processingFailed) "保存原片" else "保存成片", null)
+            .setPositiveButton(
+                when {
+                    croppedOnly && processingFailed -> "保存裁剪照片"
+                    croppedOnly -> "保存裁剪成片"
+                    processingFailed -> "保存原片"
+                    else -> "保存成片"
+                },
+                null,
+            )
             .setNeutralButton(if (processingFailed) "" else "保存原片", null)
             .setNegativeButton("重拍", null)
             .create()
         dialog.setOnDismissListener {
+            photoCaptureInProgress = false
+            shutterButton.isEnabled = true
             processedBitmap?.recycle()
             originalBitmap?.recycle()
             originalFile.delete()
             temporaryProcessedFile.delete()
         }
         dialog.show()
-        if (processingFailed || preset.style == ColorStyle.NATURAL || amount == 0) {
+        if (croppedOnly || processingFailed || preset.style == ColorStyle.NATURAL || amount == 0) {
             dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).visibility = View.GONE
         }
         dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             val file = if (processingFailed) originalFile else processedFile
-            savePhotoToGallery(file, timestamp, if (processingFailed) "原片" else preset.name)
+            savePhotoToGallery(
+                file,
+                timestamp,
+                when {
+                    croppedOnly && processingFailed -> "AI裁剪"
+                    croppedOnly -> "AI裁剪_${preset.name}"
+                    processingFailed -> "原片"
+                    else -> preset.name
+                },
+            )
             dialog.dismiss()
         }
         dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
             savePhotoToGallery(originalFile, timestamp, "原片")
             dialog.dismiss()
+        }
+        dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+            dialog.dismiss()
+            takePhoto(if (croppedOnly) activeAiCropRect else null)
         }
     }
 
@@ -1953,5 +2203,9 @@ class MainActivity : ComponentActivity() {
         const val CLOUD_ADVICE_TTL_MS = 30_000L
         const val MAX_CLOUD_EXPOSURE_DELTA_EV = 1.0f
         const val MAX_CLOUD_ZOOM_FACTOR = 1.5f
+        const val CAMERA_PREFERENCES = "camera_agent_preferences"
+        const val KEY_AUTO_CAPTURE_AFTER_AI = "auto_capture_after_ai"
+        const val AUTO_CAPTURE_PREVIEW_DELAY_MS = 420L
+        const val CAMERA_ADVICE_FADE_DURATION_MS = 160L
     }
 }

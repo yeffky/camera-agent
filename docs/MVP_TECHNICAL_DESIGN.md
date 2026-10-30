@@ -135,6 +135,14 @@ CameraX Preview / ImageCapture / ImageAnalysis
 - 预览不模拟逐像素高光/阴影曲线和厂商 ISP；成片仍由 `PhotoColorProcessor` 完整处理，需在真机检查预览与成片差异和流畅度。
 - 详细需求见 [OpenSpec：preset-live-preview](../openspec/changes/preset-live-preview/proposal.md)。
 
+### 阶段 H：云端 AI 取景裁剪与拍摄（客户端实现完成；云端联调/真机验收待做）
+
+- 用户点击取景页 AI 拍摄入口后才上传一帧；在当前取景页显示云端建议和裁剪框。
+- 响应可包含基于正向、非镜像上传图像的归一化 `crop_rect`；客户端校验坐标、裁剪面积和取景可见范围，再只允许白名单中的曝光、变焦、风格动作。
+- 用户默认手动按快门；可在 AI 建议卡片中显式开启 AI 调整成功后拍摄一次。无效/过期/失败或未应用的建议不会触发自动快门。
+- AI 裁剪使用原始分辨率 ImageCapture JPEG 的 EXIF 坐标映射，并只保存裁剪输出；裁剪失败时删除未裁剪临时照片并退回普通相机。
+- 云端响应、PreviewView 和不同厂商照片方向/比例仍需用真实服务和设备验证；详细契约见 [OpenSpec：ai-framing-capture](../openspec/changes/ai-framing-capture/proposal.md)。
+
 ## 7. 验收标准
 
 - 无 root，使用公开 Android 相机 API。
