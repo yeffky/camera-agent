@@ -100,6 +100,7 @@ data class SceneAssessment(
     val imageAspectRatio: Float,
     val recommendedColorStyle: ColorStyle,
     val exposureCompensationOffset: Int,
+    val visualSignature: Long,
 )
 
 class AgentSceneAnalyzer(
@@ -118,6 +119,7 @@ class AgentSceneAnalyzer(
     @Volatile
     private var closed = false
     private var lastAnalysisAtMs = 0L
+    private var previousVisualSignature: Long? = null
 
     override fun analyze(imageProxy: ImageProxy) {
         if (closed) {
@@ -144,6 +146,7 @@ class AgentSceneAnalyzer(
         lastAnalysisAtMs = now
         processing = true
         val brightness = estimateLuma(imageProxy)
+        val visualSignature = calculateVisualSignature(imageProxy)
         val rotated = imageProxy.imageInfo.rotationDegrees % 180 != 0
         val imageWidth = if (rotated) imageProxy.height else imageProxy.width
         val imageHeight = if (rotated) imageProxy.width else imageProxy.height
@@ -161,7 +164,7 @@ class AgentSceneAnalyzer(
                     if (!hasPerson) {
                         publish(
                             imageProxy,
-                            createAssessment(labels, brightness, null, imageWidth, imageHeight, imageAspectRatio),
+                            createAssessment(labels, brightness, null, imageWidth, imageHeight, imageAspectRatio, visualSignature),
                         )
                         return@addOnCompleteListener
                     }
@@ -174,20 +177,20 @@ class AgentSceneAnalyzer(
                         }
                         publish(
                             imageProxy,
-                            createAssessment(labels, brightness, face, imageWidth, imageHeight, imageAspectRatio),
+                            createAssessment(labels, brightness, face, imageWidth, imageHeight, imageAspectRatio, visualSignature),
                         )
                     }
                 } catch (_: Exception) {
                     publish(
                         imageProxy,
-                        createAssessment(emptyList(), brightness, null, imageWidth, imageHeight, imageAspectRatio),
+                        createAssessment(emptyList(), brightness, null, imageWidth, imageHeight, imageAspectRatio, visualSignature),
                     )
                 }
             }
         } catch (_: Exception) {
             publish(
                 imageProxy,
-                createAssessment(emptyList(), brightness, null, imageWidth, imageHeight, imageAspectRatio),
+                createAssessment(emptyList(), brightness, null, imageWidth, imageHeight, imageAspectRatio, visualSignature),
             )
         }
     }
@@ -199,6 +202,7 @@ class AgentSceneAnalyzer(
         imageWidth: Int,
         imageHeight: Int,
         imageAspectRatio: Float,
+        visualSignature: Long,
     ): SceneAssessment {
         val personConfidence = labels.categoryConfidence(::isPersonLabel)
         val foodConfidence = labels.categoryConfidence(::isFoodLabel)
@@ -259,7 +263,37 @@ class AgentSceneAnalyzer(
             imageAspectRatio = imageAspectRatio,
             recommendedColorStyle = style,
             exposureCompensationOffset = exposureOffset,
+            visualSignature = visualSignature,
         )
+    }
+
+    private fun calculateVisualSignature(imageProxy: ImageProxy): Long {
+        val plane = imageProxy.planes.firstOrNull() ?: return previousVisualSignature ?: 0L
+        val buffer = plane.buffer.duplicate()
+        val signatureWidth = 9
+        val signatureHeight = 8
+        val samples = Array(signatureHeight) { row ->
+            IntArray(signatureWidth) { column ->
+                val x = ((column + 0.5f) * imageProxy.width / signatureWidth).toInt()
+                    .coerceIn(0, imageProxy.width - 1)
+                val y = ((row + 0.5f) * imageProxy.height / signatureHeight).toInt()
+                    .coerceIn(0, imageProxy.height - 1)
+                val index = y * plane.rowStride + x * plane.pixelStride
+                if (index !in 0 until buffer.limit()) 0 else buffer.get(index).toInt() and 0xff
+            }
+        }
+        var signature = 0L
+        var bit = 0
+        for (row in 0 until signatureHeight) {
+            for (column in 0 until signatureWidth - 1) {
+                if (samples[row][column] > samples[row][column + 1]) {
+                    signature = signature or (1L shl bit)
+                }
+                bit++
+            }
+        }
+        previousVisualSignature = signature
+        return signature
     }
 
     private fun estimateLuma(imageProxy: ImageProxy): Float {

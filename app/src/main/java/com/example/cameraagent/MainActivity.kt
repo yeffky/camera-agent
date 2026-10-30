@@ -43,6 +43,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
 private data class AgentApplySnapshot(
     val exposureIndex: Int,
@@ -59,6 +60,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var compositionOverlay: CompositionOverlayView
     private lateinit var statusText: TextView
+    private lateinit var captureIntentButton: TextView
     private lateinit var zoomSeekBar: SeekBar
     private lateinit var zoomLabel: TextView
     private lateinit var exposureLabel: TextView
@@ -125,7 +127,14 @@ class MainActivity : ComponentActivity() {
     private var latestCloudAdvice: CameraAdvice? = null
     private var latestCloudAdviceAtMs = 0L
     private var latestCloudAdviceSceneName: String? = null
+    private var latestCloudAdviceVisualSignature: Long? = null
+    private var latestCloudAdviceFaceBounds: android.graphics.RectF? = null
+    private var latestCloudAdviceRequestId: String? = null
+    private var latestAdviceIntentId: String? = null
     private var latestAgentApplySnapshot: AgentApplySnapshot? = null
+    private var agentCaptureContext = AgentCaptureContext()
+    @Volatile
+    private var activeAgentRequest: ActiveAgentRequest? = null
 
     private val requestCameraPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -153,12 +162,19 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        cancelActiveAgentRequest("页面已关闭", updateUi = false)
         super.onDestroy()
         sceneAnalyzer?.close()
         cameraExecutor.shutdown()
         analysisExecutor.shutdown()
         photoProcessingExecutor.shutdown()
         cloudApiExecutor.shutdownNow()
+    }
+
+    override fun onStop() {
+        if (activeAgentRequest != null) cancelActiveAgentRequest("应用已进入后台")
+        agentCaptureContext = AgentCaptureContext()
+        super.onStop()
     }
 
     private fun createCameraScreen(): View {
@@ -245,6 +261,17 @@ class MainActivity : ComponentActivity() {
             setPadding(0, dp(2), 0, 0)
         }
         sceneStatusCard.addView(statusText, matchWidthWrapHeight())
+        captureIntentButton = TextView(this).apply {
+            text = "拍摄意图：自动判断  ⌄"
+            textSize = 11f
+            setTextColor(Color.rgb(231, 223, 255))
+            setPadding(0, dp(5), 0, 0)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "选择拍摄意图"
+            setOnClickListener { showCaptureIntentPicker() }
+        }
+        sceneStatusCard.addView(captureIntentButton, matchWidthWrapHeight())
         topBar.addView(
             sceneStatusCard,
             android.widget.FrameLayout.LayoutParams(dp(188), -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL),
@@ -299,6 +326,10 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.WHITE)
             setBackgroundResource(R.drawable.bg_glass_button)
             setOnClickListener {
+                if (cloudRequestInFlight) {
+                    cancelActiveAgentRequest("已取消分析")
+                    return@setOnClickListener
+                }
                 captureAutomaticallyAfterAi = !captureAutomaticallyAfterAi
                 getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE).edit()
                     .putBoolean(KEY_AUTO_CAPTURE_AFTER_AI, captureAutomaticallyAfterAi).apply()
@@ -572,6 +603,11 @@ class MainActivity : ComponentActivity() {
 
     private fun switchTab(tab: String) {
         if (tab !in setOf("home", "presets", "settings")) return
+        if (tab != "home") {
+            if (activeAgentRequest != null) cancelActiveAgentRequest("已离开取景页")
+            agentCaptureContext = AgentCaptureContext()
+            updateCaptureIntentButton()
+        }
         activeTab = tab
         updateNavTabAppearance()
         val isHome = tab == "home"
@@ -587,6 +623,65 @@ class MainActivity : ComponentActivity() {
             cameraContent.alpha = 0f
             cameraContent.animate().alpha(1f).setDuration(160L).start()
         }
+    }
+
+    private fun selectedCaptureIntentId(): String? = CaptureIntentCatalog.find(
+        latestAssessment?.sceneName,
+        agentCaptureContext.selectedIntentId,
+    )?.id
+
+    private fun updateCaptureIntentButton() {
+        if (!::captureIntentButton.isInitialized) return
+        val selected = CaptureIntentCatalog.find(latestAssessment?.sceneName, agentCaptureContext.selectedIntentId)
+        captureIntentButton.text = "拍摄意图：${selected?.label ?: "自动判断"}  ⌄"
+        captureIntentButton.alpha = if (CaptureIntentCatalog.options(latestAssessment?.sceneName).isEmpty()) 0.72f else 1f
+    }
+
+    private fun showCaptureIntentPicker() {
+        val options = CaptureIntentCatalog.options(latestAssessment?.sceneName)
+        val labels = listOf("自动判断") + options.map { it.label }
+        val currentIndex = options.indexOfFirst { it.id == agentCaptureContext.selectedIntentId }
+            .takeIf { it >= 0 }?.plus(1) ?: 0
+        android.app.AlertDialog.Builder(this)
+            .setTitle("拍摄意图")
+            .setSingleChoiceItems(labels.toTypedArray(), currentIndex) { dialog, which ->
+                agentCaptureContext.selectedIntentId = options.getOrNull(which - 1)?.id
+                updateCaptureIntentButton()
+                dialog.dismiss()
+            }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    private fun cancelActiveAgentRequest(reason: String, updateUi: Boolean = true) {
+        val request = activeAgentRequest ?: return
+        activeAgentRequest = null
+        request.cancellation.cancel()
+        cloudRequestInFlight = false
+        if (updateUi) {
+            if (::sendCloudRequestButton.isInitialized) {
+                sendCloudRequestButton.isEnabled = true
+                sendCloudRequestButton.text = "发送当前画面并获取建议"
+            }
+            if (::cameraAutoCaptureButton.isInitialized) updateCameraAutoCaptureButton()
+            showCameraAdvice("$reason；相机仍可正常拍摄。")
+            showStatus("AI 分析已取消")
+        }
+    }
+
+    private fun hasCompositionChanged(request: ActiveAgentRequest, assessment: SceneAssessment): Boolean {
+        if (request.sceneName != assessment.sceneName) return true
+        val signature = request.visualSignature
+        if (signature != null && java.lang.Long.bitCount(signature xor assessment.visualSignature) >= VISUAL_CHANGE_THRESHOLD) {
+            return true
+        }
+        val before = request.faceBounds
+        val after = assessment.faceBounds
+        return if (before == null || after == null) before != after else
+            kotlin.math.abs(before.centerX() - after.centerX()) >= FACE_MOVE_THRESHOLD ||
+                kotlin.math.abs(before.centerY() - after.centerY()) >= FACE_MOVE_THRESHOLD ||
+                kotlin.math.abs(before.width() - after.width()) >= FACE_MOVE_THRESHOLD ||
+                kotlin.math.abs(before.height() - after.height()) >= FACE_MOVE_THRESHOLD
     }
 
     private fun updateNavTabAppearance() {
@@ -1069,7 +1164,10 @@ class MainActivity : ComponentActivity() {
 
     private fun previewAgentRequest() {
         val config = readAgentConfig() ?: return
-        val requestBody = buildAgentRequestBody(config, includeImagePlaceholder = true)
+        val requestBody = buildAgentRequestBody(
+            config, "[发送时生成]", agentCaptureContext, selectedCaptureIntentId(), manualColorOverride,
+            includeImagePlaceholder = true,
+        )
         updateRequestPreview(config, requestBody)
         showAgentConfigStatus("请求预览已生成；点击“发送当前画面并获取建议”会上传一张当前取景帧")
     }
@@ -1114,6 +1212,10 @@ class MainActivity : ComponentActivity() {
 
     private fun buildAgentRequestBody(
         config: AgentApiConfig,
+        requestId: String,
+        captureContext: AgentCaptureContext,
+        intentId: String?,
+        styleLocked: Boolean,
         imageDataUrl: String? = null,
         imageAspectRatio: Float? = null,
         includeImagePlaceholder: Boolean = false,
@@ -1141,9 +1243,11 @@ class MainActivity : ComponentActivity() {
         if (exposureState?.isExposureCompensationSupported == true && exposureStep > 0f) {
             supportedControls.put("exposure_ev")
         }
-        supportedControls.put("color_style")
-        supportedControls.put("preset_id")
-        supportedControls.put("preset_strength")
+        if (!styleLocked) {
+            supportedControls.put("color_style")
+            supportedControls.put("preset_id")
+            supportedControls.put("preset_strength")
+        }
         supportedControls.put("composition")
         val capabilities = JSONObject()
             .put("supported_controls", supportedControls)
@@ -1163,10 +1267,37 @@ class MainActivity : ComponentActivity() {
             )
         }
         val userContent = JSONObject()
+            .put("schema_version", 2)
+            .put("request_id", requestId)
             .put("scene", scene)
             .put("current_controls", currentControls)
             .put("device_capabilities", capabilities)
-            .put("request", "结合本条消息附带的当前取景图片与相机状态，给出构图、色彩和参数建议。若画面边缘有干扰物，可建议裁剪框；仅建议设备支持范围内的动作，不要执行操作。")
+            .put("capture_context", JSONObject()
+                .put("session_id", captureContext.sessionId)
+                .put("intent_id", intentId ?: JSONObject.NULL)
+                .put("style_locked", styleLocked)
+                .apply {
+                    captureContext.previousTurn?.let { turn ->
+                        put("previous_turn", JSONObject()
+                            .put("request_id", turn.requestId)
+                            .put("intent_id", turn.intentId ?: JSONObject.NULL)
+                            .put("scene", turn.sceneName)
+                            .put("summary", turn.summary)
+                            .put("subject_type", turn.subjectType)
+                            .put("people_count_class", turn.peopleCountClass)
+                            .put("completed_at_elapsed_ms", turn.completedAtMs)
+                            .put("applied_actions", JSONArray(turn.appliedActions))
+                            .put("skipped_actions", JSONArray(turn.skippedActions))
+                            .put("failed_actions", JSONArray(turn.failedActions)))
+                    }
+                })
+            .put("request", "只依据本条附带的新图像和结构化上下文生成建议。裁剪需保持主体完整，优先只做轻微构图修正；需要明显移动手机时给 reframe_tip，不给 crop_rect。不要判断人物动作，不要执行操作。")
+        intentId?.let { selectedIntent ->
+            CaptureIntentCatalog.find(assessment?.sceneName, selectedIntent)?.let { option ->
+                userContent.put("capture_intent", JSONObject().put("id", option.id).put("label", option.label))
+            }
+        }
+        if (styleLocked) userContent.put("style_instruction", "用户已手动选择风格预设；尊重当前预设，不得提供风格覆盖动作。")
         imageAspectRatio?.takeIf { it.isFinite() && it > 0f }?.let { aspect ->
             userContent.put(
                 "frame_geometry",
@@ -1198,15 +1329,16 @@ class MainActivity : ComponentActivity() {
                     .put("role", "system")
                     .put(
                         "content",
-            "你是拍摄参数建议助手。只返回 JSON 对象，不要 Markdown。格式为 " +
-                            "{schema_version:1,summary:string,rationale:string,crop_rect:null|{left:number,top:number,right:number,bottom:number},suggestions:[{kind:string,value:number|string}]}。" +
-                            "crop_rect 使用 0 到 1 的归一化坐标，基于 upright_non_mirrored_image；只在确实需要重新构图时返回，否则为 null。" +
+            "你是 Camera Agent。只返回 JSON 对象，不要 Markdown。必须原样返回 schema_version=2 和 request_id。格式为 " +
+                            "{schema_version:2,request_id:string,summary:string,rationale:string,subject:{type:string,people_count_class:string,confidence:number,regions:[{left:number,top:number,right:number,bottom:number}]},crop_confidence:number,reframe_tip:string|null,crop_rect:null|{left:number,top:number,right:number,bottom:number},suggestions:[{kind:string,value:number|string}]}。" +
+                            "subject.type 仅可为 person/food/object/landscape/mixed/unknown；people_count_class 仅可为 single/pair/group/crowded/not_applicable/unknown。置信度均为 0 到 1。" +
+                            "crop_rect 使用 0 到 1 的归一化坐标，基于 upright_non_mirrored_image；只在主体完整且裁剪后保留至少 70% 画面时返回，否则为 null。低置信度时不裁剪。明显需要用户移动手机时返回 reframe_tip。" +
                             "kind 仅可为 exposure_ev（目标曝光补偿 EV）、zoom_ratio（目标倍率）、" +
                             "color_style（NATURAL/WARM/SOFT/VIVID/COOL/MONOCHROME）、" +
                             "preset_id（本地预设 ID）或 preset_strength（0 到 100）或 composition（构图提示）。" +
                             "preset_id 只能从 natural、warm_film、faded_film、cinematic、neon、portrait、food、monochrome 中选择。" +
                             "只能依据用户消息附带的这一张图像和结构化数据进行建议；相机控制必须属于 device_capabilities.supported_controls，" +
-                            "风格只能建议上述本地预设库中的 preset_id 和 0 到 100 的 preset_strength。不得要求上传其他图像或执行操作。",
+                            "风格只能建议上述本地预设库中的 preset_id 和 0 到 100 的 preset_strength；style_locked=true 时不得返回任何风格动作。不得判断人物动作、要求上传其他图像或执行操作。",
                     ),
             )
             .put(JSONObject().put("role", "user").put("content", userMessageContent))
@@ -1215,6 +1347,23 @@ class MainActivity : ComponentActivity() {
             .put("temperature", config.temperature.coerceIn(0.0, 2.0))
             .put("stream", false)
             .put("messages", messages)
+    }
+
+    private fun attachImageToAgentRequest(template: JSONObject, imageDataUrl: String, imageAspectRatio: Float): JSONObject {
+        val requestBody = JSONObject(template.toString())
+        val messages = requestBody.getJSONArray("messages")
+        val content = messages.getJSONObject(1).getJSONArray("content")
+        val textBlock = content.getJSONObject(0)
+        val userContent = JSONObject(textBlock.getString("text"))
+        userContent.put(
+            "frame_geometry",
+            JSONObject()
+                .put("coordinate_space", "upright_non_mirrored_image")
+                .put("aspect_ratio", imageAspectRatio.toDouble()),
+        )
+        textBlock.put("text", userContent.toString())
+        content.getJSONObject(1).getJSONObject("image_url").put("url", imageDataUrl)
+        return requestBody
     }
 
     private fun updateRequestPreview(config: AgentApiConfig, requestBody: JSONObject) {
@@ -1241,7 +1390,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendCloudRequest() {
-        if (cloudRequestInFlight || cloudAdviceApplying) return
+        if (cloudRequestInFlight) {
+            cancelActiveAgentRequest("已取消分析")
+            return
+        }
+        if (cloudAdviceApplying) return
         if (settingsPage == null) settingsPage = createAgentSettingsPage()
         if (::controlsPanel.isInitialized) controlsPanel.visibility = View.GONE
         val config = readAgentConfig() ?: return
@@ -1265,45 +1418,89 @@ class MainActivity : ComponentActivity() {
             return
         }
         switchTab("home")
-        updateRequestPreview(config, buildAgentRequestBody(config, includeImagePlaceholder = true))
+        val requestId = UUID.randomUUID().toString()
+        val sceneAtRequest = latestAssessment
+        val intentId = selectedCaptureIntentId()
+        val styleLocked = manualColorOverride
+        val contextAtRequest = AgentCaptureContext(
+            sessionId = agentCaptureContext.sessionId,
+            selectedIntentId = intentId,
+            previousTurn = agentCaptureContext.previousTurn,
+        )
+        val request = ActiveAgentRequest(
+            requestId = requestId,
+            sceneName = sceneAtRequest?.sceneName,
+            visualSignature = sceneAtRequest?.visualSignature,
+            faceBounds = sceneAtRequest?.faceBounds?.let { android.graphics.RectF(it) },
+            intentId = intentId,
+            selectedPresetId = selectedPresetId,
+            styleLocked = styleLocked,
+            startedAtMs = SystemClock.elapsedRealtime(),
+            cancellation = AgentRequestCancellation(),
+        )
+        activeAgentRequest = request
+        val requestBodyTemplate = buildAgentRequestBody(
+            config, requestId, contextAtRequest, intentId, styleLocked, includeImagePlaceholder = true,
+        )
+        updateRequestPreview(config, requestBodyTemplate)
         latestCloudAdvice = null
-        val requestSceneName = latestAssessment?.sceneName
         if (::cloudAdviceText.isInitialized) cloudAdviceText.text = "正在采集一张当前取景帧，然后请求云端建议…"
         showCameraAdvice("正在分析当前取景画面…")
         cloudRequestInFlight = true
-        if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = false
+        if (::sendCloudRequestButton.isInitialized) {
+            sendCloudRequestButton.isEnabled = true
+            sendCloudRequestButton.text = "取消 AI 分析"
+        }
+        if (::cameraAutoCaptureButton.isInitialized) cameraAutoCaptureButton.text = "取消 AI 分析"
         showStatus("正在发送取景帧给 AI...")
         try {
             capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: androidx.camera.core.ImageProxy) {
+                if (activeAgentRequest?.requestId != requestId || request.cancellation.isCancelled()) {
+                    image.close()
+                    return
+                }
                 cloudApiExecutor.execute {
                     try {
-                        val imageDataUrl = CloudImageEncoder.encodeJpegDataUrl(image)
+                        request.cancellation.throwIfCancelled()
+                        val imageDataUrl = CloudImageEncoder.encodeJpegDataUrl(image, request.cancellation)
                         val rotation = image.imageInfo.rotationDegrees % 180 != 0
                         val uprightWidth = if (rotation) image.height else image.width
                         val uprightHeight = if (rotation) image.width else image.height
                         val imageAspectRatio = uprightWidth.toFloat() / uprightHeight.coerceAtLeast(1)
-                        val requestBody = buildAgentRequestBody(
-                            config,
-                            imageDataUrl = imageDataUrl,
-                            imageAspectRatio = imageAspectRatio,
-                        )
-                        val content = OpenAiCompatibleClient().complete(config, apiKey, requestBody)
-                        val advice = CameraAdviceParser.parse(content)
+                        val requestBody = attachImageToAgentRequest(requestBodyTemplate, imageDataUrl, imageAspectRatio)
+                        val content = OpenAiCompatibleClient().complete(config, apiKey, requestBody, request.cancellation)
+                        val advice = CameraAdviceParser.parse(content, requestId, styleLocked)
                         runOnUiThread {
+                            if (activeAgentRequest?.requestId != requestId || request.cancellation.isCancelled()) return@runOnUiThread
+                            activeAgentRequest = null
                             cloudRequestInFlight = false
-                            if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
+                            if (::sendCloudRequestButton.isInitialized) {
+                                sendCloudRequestButton.isEnabled = true
+                                sendCloudRequestButton.text = "发送当前画面并获取建议"
+                            }
+                            if (::cameraAutoCaptureButton.isInitialized) updateCameraAutoCaptureButton()
                             latestCloudAdvice = advice
                             latestCloudAdviceAtMs = SystemClock.elapsedRealtime()
-                            latestCloudAdviceSceneName = requestSceneName
+                            latestCloudAdviceSceneName = request.sceneName
+                            latestCloudAdviceVisualSignature = request.visualSignature
+                            latestCloudAdviceFaceBounds = request.faceBounds
+                            latestCloudAdviceRequestId = requestId
+                            latestAdviceIntentId = intentId
                             latestCloudAdviceAspectRatio = imageAspectRatio
                             applyCloudAdvice(advice)
                             latestCloudAdvice = null
                         }
                     } catch (error: Exception) {
                         runOnUiThread {
+                            if (activeAgentRequest?.requestId != requestId) return@runOnUiThread
+                            activeAgentRequest = null
                             cloudRequestInFlight = false
-                            if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
+                            if (::sendCloudRequestButton.isInitialized) {
+                                sendCloudRequestButton.isEnabled = true
+                                sendCloudRequestButton.text = "发送当前画面并获取建议"
+                            }
+                            if (::cameraAutoCaptureButton.isInitialized) updateCameraAutoCaptureButton()
                             if (::cloudAdviceText.isInitialized) cloudAdviceText.text = "未能获取建议：${error.message ?: "网络或响应错误"}"
                             showCameraAdvice("AI 暂不可用\n${error.message ?: "网络或响应错误"}")
                             showStatus("请求失败：${error.message ?: "网络或响应错误"}")
@@ -1316,8 +1513,14 @@ class MainActivity : ComponentActivity() {
 
             override fun onError(exception: ImageCaptureException) {
                 runOnUiThread {
+                    if (activeAgentRequest?.requestId != requestId) return@runOnUiThread
+                    activeAgentRequest = null
                     cloudRequestInFlight = false
-                    if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = true
+                    if (::sendCloudRequestButton.isInitialized) {
+                        sendCloudRequestButton.isEnabled = true
+                        sendCloudRequestButton.text = "发送当前画面并获取建议"
+                    }
+                    if (::cameraAutoCaptureButton.isInitialized) updateCameraAutoCaptureButton()
                     if (::cloudAdviceText.isInitialized) cloudAdviceText.text = "未能采集当前取景帧：${exception.message ?: "相机拍摄错误"}"
                     showCameraAdvice("AI 暂不可用\n未能采集当前取景画面。普通相机仍可拍摄。")
                     showStatus("没有发送网络请求；相机拍摄错误")
@@ -1325,8 +1528,10 @@ class MainActivity : ComponentActivity() {
             }
             })
         } catch (error: Exception) {
+            activeAgentRequest = null
             cloudRequestInFlight = false
             sendCloudRequestButton.isEnabled = true
+            sendCloudRequestButton.text = "发送当前画面并获取建议"
             cloudAdviceText.text = "未能开始采集取景帧：${error.message ?: "相机错误"}"
             showCameraAdvice("AI 暂不可用\n未能开始分析当前取景画面。普通相机仍可拍摄。")
             showAgentConfigStatus("没有发送网络请求；请重新打开取景后重试")
@@ -1336,7 +1541,14 @@ class MainActivity : ComponentActivity() {
     private fun formatCloudAdvice(advice: CameraAdvice): String = buildString {
         append(advice.summary)
         if (advice.rationale.isNotBlank()) append("\n理由：${advice.rationale}")
+        append("\n主体：${advice.subjectType} · 人数：${advice.peopleCountClass}")
         advice.cropRect?.let { append("\nAI 建议了新的取景区域，可在画面边框中查看。") }
+        if (advice.cropRejected) {
+            append("\n建议裁剪可能切到主体或保留画面不足，已保留完整取景。")
+        } else if (advice.cropRect == null && advice.cropConfidence < MIN_AGENT_CONFIDENCE) {
+            append("\n裁剪把握不足，保留当前完整取景。可以轻微移动手机后重新分析。")
+        }
+        advice.reframeTip?.let { append("\n重新取景：$it") }
         if (advice.actions.isEmpty()) {
             if (advice.cropRect == null) append("\n没有可应用的参数建议。")
         } else {
@@ -1357,12 +1569,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun isCloudAdviceStale(): Boolean =
-        SystemClock.elapsedRealtime() - latestCloudAdviceAtMs > CLOUD_ADVICE_TTL_MS ||
+    private fun isCloudAdviceStale(advice: CameraAdvice): Boolean {
+        if (advice.requestId != latestCloudAdviceRequestId ||
+            SystemClock.elapsedRealtime() - latestCloudAdviceAtMs > CLOUD_ADVICE_TTL_MS ||
             latestAssessment?.sceneName != latestCloudAdviceSceneName
+        ) return true
+        val assessment = latestAssessment ?: return latestCloudAdviceVisualSignature != null
+        val snapshot = ActiveAgentRequest(
+            requestId = advice.requestId,
+            sceneName = latestCloudAdviceSceneName,
+            visualSignature = latestCloudAdviceVisualSignature,
+            faceBounds = latestCloudAdviceFaceBounds,
+            intentId = latestAdviceIntentId,
+            selectedPresetId = selectedPresetId,
+            styleLocked = manualColorOverride,
+            startedAtMs = latestCloudAdviceAtMs,
+            cancellation = AgentRequestCancellation(),
+        )
+        return hasCompositionChanged(snapshot, assessment)
+    }
 
     private fun applyCloudAdvice(advice: CameraAdvice) {
-        if (isCloudAdviceStale()) {
+        if (isCloudAdviceStale(advice)) {
             cloudAdviceText.text = formatCloudAdvice(advice) + "\n\n场景已变化或建议已过期，没有应用参数；请重新请求。"
             showCameraAdvice("AI 建议已过期\n请重新分析当前画面。普通相机仍可拍摄。")
             showAgentConfigStatus("云端建议已过期，没有应用参数")
@@ -1386,6 +1614,9 @@ class MainActivity : ComponentActivity() {
             cropAspectRatio = activeAiCropAspectRatio,
         )
         val outcomes = mutableListOf<String>()
+        val appliedActions = mutableListOf<String>()
+        val skippedActions = mutableListOf<String>()
+        val failedActions = mutableListOf<String>()
         val cropStateChanges = advice.cropRect != null || activeAiCropRect != null
         val cropFullyVisible = advice.cropRect?.let {
             compositionOverlay.isCropFullyVisible(it, latestCloudAdviceAspectRatio)
@@ -1407,6 +1638,18 @@ class MainActivity : ComponentActivity() {
             cameraUndoButton.visibility = View.GONE
             latestAgentApplySnapshot = null
             cloudAdviceText.append("\n没有可应用的参数建议。")
+            agentCaptureContext.previousTurn = AgentCaptureTurnContext(
+                requestId = advice.requestId,
+                intentId = latestAdviceIntentId,
+                sceneName = latestCloudAdviceSceneName.orEmpty(),
+                summary = advice.summary.take(MAX_CONTEXT_TEXT_LENGTH),
+                subjectType = advice.subjectType,
+                peopleCountClass = advice.peopleCountClass,
+                appliedActions = emptyList(),
+                skippedActions = emptyList(),
+                failedActions = emptyList(),
+                completedAtMs = SystemClock.elapsedRealtime(),
+            )
             showCameraAdvice("${advice.summary}\n没有可应用的参数建议。普通相机仍可拍摄。")
             showAgentConfigStatus("云端没有返回可应用的参数")
             return
@@ -1415,9 +1658,18 @@ class MainActivity : ComponentActivity() {
         if (::sendCloudRequestButton.isInitialized) sendCloudRequestButton.isEnabled = false
         fun recordOutcome(message: String, applied: Boolean, failed: Boolean = false, skipped: Boolean = false) {
             outcomes += message
-            if (applied) appliedCount++
-            if (failed) failedCount++
-            if (skipped) skippedCount++
+            if (applied) {
+                appliedCount++
+                appliedActions += message
+            }
+            if (failed) {
+                failedCount++
+                failedActions += message
+            }
+            if (skipped) {
+                skippedCount++
+                skippedActions += message
+            }
             pendingActions--
             if (pendingActions == 0) {
                 cloudAdviceApplying = false
@@ -1430,13 +1682,25 @@ class MainActivity : ComponentActivity() {
                     latestAgentApplySnapshot = null
                 }
                 val summary = "执行结果：已应用 $appliedCount 项，跳过 $skippedCount 项，失败 $failedCount 项；构图提示 $compositionHintCount 条。"
+                agentCaptureContext.previousTurn = AgentCaptureTurnContext(
+                    requestId = advice.requestId,
+                    intentId = latestAdviceIntentId,
+                    sceneName = latestCloudAdviceSceneName.orEmpty(),
+                    summary = advice.summary.take(MAX_CONTEXT_TEXT_LENGTH),
+                    subjectType = advice.subjectType,
+                    peopleCountClass = advice.peopleCountClass,
+                    appliedActions = appliedActions.take(MAX_CONTEXT_ACTIONS),
+                    skippedActions = skippedActions.take(MAX_CONTEXT_ACTIONS),
+                    failedActions = failedActions.take(MAX_CONTEXT_ACTIONS),
+                    completedAtMs = SystemClock.elapsedRealtime(),
+                )
                 cloudAdviceText.text = formatCloudAdvice(advice) + "\n\n" + summary + outcomes.joinToString(separator = "\n• ", prefix = "\n• ")
                 cameraAdviceText.text = formatCloudAdvice(advice) + "\n" + summary
                 if (captureAutomaticallyAfterAi && appliedCount > 0 && skippedCount == 0 && failedCount == 0) {
                     cameraAdviceText.append("\n即将按当前裁剪结果自动拍摄…")
                     cameraContent.postDelayed({
                         if (captureAutomaticallyAfterAi && cameraContent.isShown && hasWindowFocus() &&
-                            !photoCaptureInProgress && !cloudAdviceApplying
+                            !photoCaptureInProgress && !cloudAdviceApplying && !isCloudAdviceStale(advice)
                         ) {
                             takePhoto(activeAiCropRect)
                         }
@@ -1730,7 +1994,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onSceneAssessment(assessment: SceneAssessment) {
+        val previous = latestAssessment
         latestAssessment = assessment
+        if (agentCaptureContext.selectedIntentId != null &&
+            CaptureIntentCatalog.find(assessment.sceneName, agentCaptureContext.selectedIntentId) == null
+        ) {
+            agentCaptureContext.selectedIntentId = null
+        }
+        updateCaptureIntentButton()
+        activeAgentRequest?.let { request ->
+            if (hasCompositionChanged(request, assessment)) cancelActiveAgentRequest("取景画面已明显变化，请重新分析")
+        }
+        if (previous != null && previous.sceneName != assessment.sceneName && activeAgentRequest != null) {
+            cancelActiveAgentRequest("场景已变化，请重新分析")
+        }
+        if (previous != null && previous.sceneName != assessment.sceneName) {
+            agentCaptureContext.previousTurn = null
+        }
         if (latestCloudAdvice != null && assessment.sceneName != latestCloudAdviceSceneName) {
             latestCloudAdvice = null
             if (::cloudAdviceText.isInitialized) cloudAdviceText.append("\n\n场景已变化，请重新获取建议。")
@@ -1939,7 +2219,11 @@ class MainActivity : ComponentActivity() {
 
     private fun updateCameraAutoCaptureButton() {
         if (::cameraAutoCaptureButton.isInitialized) {
-            cameraAutoCaptureButton.text = if (captureAutomaticallyAfterAi) "AI 后自动拍摄：开" else "AI 后自动拍摄：关"
+            cameraAutoCaptureButton.text = when {
+                cloudRequestInFlight -> "取消 AI 分析"
+                captureAutomaticallyAfterAi -> "AI 后自动拍摄：开"
+                else -> "AI 后自动拍摄：关"
+            }
         }
     }
 
@@ -2107,6 +2391,7 @@ class MainActivity : ComponentActivity() {
 
     private fun takePhoto(cropRect: NormalizedCropRect? = activeAiCropRect) {
         if (photoCaptureInProgress) return
+        if (activeAgentRequest != null) cancelActiveAgentRequest("已开始拍摄，AI 建议已取消")
         val capture = imageCapture ?: run {
             showStatus("相机尚未就绪")
             return
@@ -2475,6 +2760,11 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val FOCUS_UPDATE_THRESHOLD = 0.06f
+        const val FACE_MOVE_THRESHOLD = 0.12f
+        const val VISUAL_CHANGE_THRESHOLD = 18
+        const val MIN_AGENT_CONFIDENCE = 0.65f
+        const val MAX_CONTEXT_TEXT_LENGTH = 200
+        const val MAX_CONTEXT_ACTIONS = 6
         const val FOCUS_AUTO_CANCEL_SECONDS = 3L
         const val CLOUD_ADVICE_TTL_MS = 30_000L
         const val MAX_CLOUD_EXPOSURE_DELTA_EV = 1.0f
