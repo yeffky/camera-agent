@@ -2113,11 +2113,9 @@ class MainActivity : ComponentActivity() {
         val recipe = photoPresetStore.recipe(preset.id)
         val signature = "${preset.id}:${selectedPresetAmount}:$recipe"
         if (signature == appliedPreviewSignature) return
-        val hardwareEffectApplied = PresetPreviewEffect.apply(previewView, preset, recipe, selectedPresetAmount)
-        compositionOverlay.setPreviewTint(
-            if (hardwareEffectApplied) Color.TRANSPARENT
-            else PresetPreviewEffect.fallbackTint(preset, recipe, selectedPresetAmount),
-        )
+        // Keep preset rendering on the overlay; applying RenderEffect to PreviewView can
+        // interrupt CameraX's live surface composition on some devices.
+        compositionOverlay.setPreviewTint(PresetPreviewEffect.fallbackTint(preset, recipe, selectedPresetAmount))
         appliedPreviewSignature = signature
         updatePresetPreviewStripSelection()
     }
