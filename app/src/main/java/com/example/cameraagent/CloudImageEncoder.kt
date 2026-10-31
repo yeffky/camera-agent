@@ -14,11 +14,13 @@ object CloudImageEncoder {
     private const val INITIAL_JPEG_QUALITY = 78
     private const val MIN_JPEG_QUALITY = 62
 
-    fun encodeJpegDataUrl(image: ImageProxy): String {
+    fun encodeJpegDataUrl(image: ImageProxy, cancellation: AgentRequestCancellation? = null): String {
+        cancellation?.throwIfCancelled()
         require(image.format == ImageFormat.JPEG) { "相机没有返回 JPEG 取景帧" }
         val plane = image.planes.firstOrNull() ?: error("取景帧为空")
         val buffer = plane.buffer.duplicate()
         val jpegBytes = ByteArray(buffer.remaining()).also(buffer::get)
+        cancellation?.throwIfCancelled()
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, bounds)
         require(bounds.outWidth > 0 && bounds.outHeight > 0) { "无法读取取景帧" }
@@ -30,6 +32,10 @@ object CloudImageEncoder {
             jpegBytes.size,
             BitmapFactory.Options().apply { inSampleSize = sampleSize },
         ) ?: error("无法解码取景帧")
+        if (cancellation?.isCancelled() == true) {
+            decoded.recycle()
+            cancellation.throwIfCancelled()
+        }
 
         var oriented = decoded
         val rotation = image.imageInfo.rotationDegrees % 360
@@ -62,6 +68,7 @@ object CloudImageEncoder {
         try {
             var quality = INITIAL_JPEG_QUALITY
             repeat(MAX_ENCODE_ATTEMPTS) { attempt ->
+                cancellation?.throwIfCancelled()
                 val output = ByteArrayOutputStream()
                 candidate.compress(Bitmap.CompressFormat.JPEG, quality, output)
                 val compressed = output.toByteArray()

@@ -52,6 +52,42 @@ enum class ColorStyle(
         0f, 1f, 0f, 0f, 0f,
         0f, 0f, 1f, 0f, 7f,
         0f, 0f, 0f, 1f, 0f,
+    )),
+    MONOCHROME("黑白", 0x10000000, floatArrayOf(
+        0.299f, 0.587f, 0.114f, 0f, 0f,
+        0.299f, 0.587f, 0.114f, 0f, 0f,
+        0.299f, 0.587f, 0.114f, 0f, 0f,
+        0f, 0f, 0f, 1f, 0f,
+    )),
+    FADED_FILM("褪色胶片", 0x12e7cda9, floatArrayOf(
+        0.88f, 0.04f, 0.02f, 0f, 18f,
+        0.03f, 0.88f, 0.04f, 0f, 16f,
+        0.02f, 0.04f, 0.86f, 0f, 20f,
+        0f, 0f, 0f, 1f, 0f,
+    )),
+    CINEMATIC("电影感", 0x103d91a4, floatArrayOf(
+        1.05f, -0.04f, -0.01f, 0f, 4f,
+        -0.02f, 0.98f, 0.02f, 0f, 1f,
+        -0.02f, 0.05f, 1.02f, 0f, 5f,
+        0f, 0f, 0f, 1f, 0f,
+    )),
+    PORTRAIT("柔和人像", 0x10ffe2ce, floatArrayOf(
+        0.94f, 0.035f, 0.025f, 0f, 9f,
+        0.035f, 0.92f, 0.025f, 0f, 7f,
+        0.015f, 0.025f, 0.92f, 0f, 5f,
+        0f, 0f, 0f, 1f, 0f,
+    )),
+    FOOD("鲜润美食", 0x0effc16a, floatArrayOf(
+        1.16f, -0.10f, -0.02f, 0f, 3f,
+        -0.04f, 1.10f, -0.02f, 0f, 2f,
+        -0.03f, -0.08f, 1.18f, 0f, -1f,
+        0f, 0f, 0f, 1f, 0f,
+    )),
+    NEON("霓虹夜色", 0x143a80ed, floatArrayOf(
+        1.18f, -0.08f, 0.02f, 0f, 3f,
+        -0.05f, 1.08f, 0.03f, 0f, 0f,
+        0.02f, -0.07f, 1.20f, 0f, 5f,
+        0f, 0f, 0f, 1f, 0f,
     ));
 
 }
@@ -64,6 +100,7 @@ data class SceneAssessment(
     val imageAspectRatio: Float,
     val recommendedColorStyle: ColorStyle,
     val exposureCompensationOffset: Int,
+    val visualSignature: Long,
 )
 
 class AgentSceneAnalyzer(
@@ -82,6 +119,7 @@ class AgentSceneAnalyzer(
     @Volatile
     private var closed = false
     private var lastAnalysisAtMs = 0L
+    private var previousVisualSignature: Long? = null
 
     override fun analyze(imageProxy: ImageProxy) {
         if (closed) {
@@ -108,6 +146,7 @@ class AgentSceneAnalyzer(
         lastAnalysisAtMs = now
         processing = true
         val brightness = estimateLuma(imageProxy)
+        val visualSignature = calculateVisualSignature(imageProxy)
         val rotated = imageProxy.imageInfo.rotationDegrees % 180 != 0
         val imageWidth = if (rotated) imageProxy.height else imageProxy.width
         val imageHeight = if (rotated) imageProxy.width else imageProxy.height
@@ -125,7 +164,7 @@ class AgentSceneAnalyzer(
                     if (!hasPerson) {
                         publish(
                             imageProxy,
-                            createAssessment(labels, brightness, null, imageWidth, imageHeight, imageAspectRatio),
+                            createAssessment(labels, brightness, null, imageWidth, imageHeight, imageAspectRatio, visualSignature),
                         )
                         return@addOnCompleteListener
                     }
@@ -138,20 +177,20 @@ class AgentSceneAnalyzer(
                         }
                         publish(
                             imageProxy,
-                            createAssessment(labels, brightness, face, imageWidth, imageHeight, imageAspectRatio),
+                            createAssessment(labels, brightness, face, imageWidth, imageHeight, imageAspectRatio, visualSignature),
                         )
                     }
                 } catch (_: Exception) {
                     publish(
                         imageProxy,
-                        createAssessment(emptyList(), brightness, null, imageWidth, imageHeight, imageAspectRatio),
+                        createAssessment(emptyList(), brightness, null, imageWidth, imageHeight, imageAspectRatio, visualSignature),
                     )
                 }
             }
         } catch (_: Exception) {
             publish(
                 imageProxy,
-                createAssessment(emptyList(), brightness, null, imageWidth, imageHeight, imageAspectRatio),
+                createAssessment(emptyList(), brightness, null, imageWidth, imageHeight, imageAspectRatio, visualSignature),
             )
         }
     }
@@ -163,6 +202,7 @@ class AgentSceneAnalyzer(
         imageWidth: Int,
         imageHeight: Int,
         imageAspectRatio: Float,
+        visualSignature: Long,
     ): SceneAssessment {
         val personConfidence = labels.categoryConfidence(::isPersonLabel)
         val foodConfidence = labels.categoryConfidence(::isFoodLabel)
@@ -223,7 +263,37 @@ class AgentSceneAnalyzer(
             imageAspectRatio = imageAspectRatio,
             recommendedColorStyle = style,
             exposureCompensationOffset = exposureOffset,
+            visualSignature = visualSignature,
         )
+    }
+
+    private fun calculateVisualSignature(imageProxy: ImageProxy): Long {
+        val plane = imageProxy.planes.firstOrNull() ?: return previousVisualSignature ?: 0L
+        val buffer = plane.buffer.duplicate()
+        val signatureWidth = 9
+        val signatureHeight = 8
+        val samples = Array(signatureHeight) { row ->
+            IntArray(signatureWidth) { column ->
+                val x = ((column + 0.5f) * imageProxy.width / signatureWidth).toInt()
+                    .coerceIn(0, imageProxy.width - 1)
+                val y = ((row + 0.5f) * imageProxy.height / signatureHeight).toInt()
+                    .coerceIn(0, imageProxy.height - 1)
+                val index = y * plane.rowStride + x * plane.pixelStride
+                if (index !in 0 until buffer.limit()) 0 else buffer.get(index).toInt() and 0xff
+            }
+        }
+        var signature = 0L
+        var bit = 0
+        for (row in 0 until signatureHeight) {
+            for (column in 0 until signatureWidth - 1) {
+                if (samples[row][column] > samples[row][column + 1]) {
+                    signature = signature or (1L shl bit)
+                }
+                bit++
+            }
+        }
+        previousVisualSignature = signature
+        return signature
     }
 
     private fun estimateLuma(imageProxy: ImageProxy): Float {
