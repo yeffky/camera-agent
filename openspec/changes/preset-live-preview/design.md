@@ -14,7 +14,7 @@
 
 - 将取景预览风格作为可撤销的显示效果，不改变 CameraX 的 ImageCapture 或 ImageAnalysis 帧。
 - 复用 `PhotoPresetStore` 的选中预设、强度和配方；预览状态变更立即刷新效果层。
-- Android 12 及以上将 `PreviewView` 切至兼容渲染模式，并用硬件 `RenderEffect` 应用轻量颜色矩阵；Android 10/11 显示按强度缩放的轻量色调提示。两条路径都不修改 CameraX 分析帧或拍摄源。
+- 取景影调通过独立 overlay 显示按强度调整的轻量色调提示，不在 `PreviewView` 上设置 `RenderEffect`。设备验证发现切换预设时该效果可能干扰 CameraX 实时预览合成；最终照片仍由 `PhotoColorProcessor` 应用完整配方。
 - 预览不逐像素模拟高光/阴影曲线或设备 ISP；最终 JPEG 继续由 `PhotoColorProcessor` 完整处理，并在预设页说明预览与成片可能存在细节差异。
 - 滑杆拖动期间更新预览，但避免为每次拖动重建页面或重绑 CameraX use case。
 
@@ -23,7 +23,7 @@
 - 预览渲染效果与 JPEG 后处理结果可能存在色域/色调差异；保存输出必须以照片处理器为准，后续设备验收校准观感。
 - 视图级效果对截图/系统合成和老设备存在差异，需记录适配边界。
 - 取景控件需要留出空间，不能遮挡快门、主体或 Agent 的裁剪覆盖层。
-- `RenderEffect` 与 `PreviewView` 的兼容渲染路径可能增加图形合成负担；真机验收需关注流畅度、预览延迟和低端机降级。
+- overlay 色调是轻量提示，不等同于完整照片配方的逐像素取景效果；真机验收需确认切换预设后预览持续更新。
 
 ## Rollout
 
