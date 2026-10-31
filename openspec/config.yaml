@@ -1,0 +1,19 @@
+schema: spec-driven
+context: |
+  Project: Camera Agent, a native Android camera app built with CameraX.
+  Product design: docs/PRODUCT_DESIGN.md.
+  Core user: ordinary users who want composition/scene guidance and quick good photos.
+  Current iteration: live preset preview, user-triggered cloud AI crop/parameter advice,
+  selectable manual or automatic capture, cropped-only output, and light post-capture editing.
+  Advanced Camera2 controls and product-owner acceptance are deferred until all implementation stages finish.
+  Cloud requests are explicit, single-frame only; the client validates all returned actions.
+rules:
+  proposal:
+    - Write in Chinese and state user value, scope, exclusions, and dependencies.
+  specs:
+    - Use normative SHALL statements and observable acceptance scenarios.
+    - Keep camera actions limited to client-validated, device-supported capabilities.
+  design:
+    - Document preview/photo coordinate mapping, lifecycle, failure behavior, and privacy.
+  tasks:
+    - Split work into independently reviewable implementation steps.
