@@ -100,6 +100,8 @@ scripts/verify-mvp.ps1           # 构建与 APK 权限检查，可选设备验�
 - Gradle Wrapper 9.6.0（项目通过 `gradlew.bat` 使用）
 - Android 设备或模拟器：Android 10 / API 29 或更高版本
 
+本项目需要 Android Studio 2024.1 或更高版本。
+
 ### 在 Android Studio 中运行
 
 1. 克隆仓库并在 Android Studio 中打开项目根目录。
