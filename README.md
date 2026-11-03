@@ -169,3 +169,5 @@ app/build/outputs/apk/debug/app-debug.apk
 ## 许可证
 
 当前仓库尚未声明开源许可证；如需公开再分发或作为依赖使用，请先联系项目维护者确认授权。
+
+本项目需要 Android Studio 2024.1 或更高版本。
