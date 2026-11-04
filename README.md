@@ -88,6 +88,7 @@ app/src/main/java/com/example/cameraagent/
 
 docs/                            # 产品、技术、设备验收和研究文档
 openspec/                        # 分阶段需求与设计规格
+scripts/build-apk.sh             # Linux/WSL 下构建 Debug APK 并检查打包结果
 scripts/verify-mvp.ps1           # 构建与 APK 权限检查，可选设备验证
 ```
 
@@ -96,8 +97,8 @@ scripts/verify-mvp.ps1           # 构建与 APK 权限检查，可选设备验�
 ### 环境要求
 
 - Android Studio（安装 Android SDK Platform 35）
-- JDK 17
-- Gradle Wrapper 9.6.0（项目通过 `gradlew.bat` 使用）
+- JDK 17（`JAVA_HOME` 指向 JDK 17）
+- Gradle 8.10.2（Android Gradle Plugin 8.8.2 的兼容版本；本仓库的 Gradle Wrapper 固定为 Gradle 9.x，与 AGP 8.8.2 不兼容，基于 Wrapper 的同步或构建会因 Gradle 版本检查失败）
 - Android 设备或模拟器：Android 10 / API 29 或更高版本
 
 ### 在 Android Studio 中运行
@@ -109,10 +110,25 @@ scripts/verify-mvp.ps1           # 构建与 APK 权限检查，可选设备验�
 
 ### 命令行构建
 
-在 PowerShell 项目根目录执行：
+Linux / WSL / macOS 下可直接使用 `scripts/build-apk.sh`。脚本会检查 JDK 17 与 Android SDK
+Platform 35、Build-Tools 35.0.0，调用 Gradle 构建 Debug APK，检查打包后的包名、版本号、
+`minSdk 29` 与权限（包含 `CAMERA`、`INTERNET`，不含 `ACCESS_NETWORK_STATE`），校验签名，
+最后把 APK 复制到 `dist/` 并生成 SHA-256 校验文件：
 
-```powershell
-.\gradlew.bat :app:assembleDebug
+```bash
+export JAVA_HOME=/path/to/jdk-17
+export ANDROID_SDK_ROOT=/path/to/android-sdk
+export GRADLE_HOME=/path/to/gradle-8.10.2
+./scripts/build-apk.sh            # 输出到 dist/，也可传入自定义输出目录
+```
+
+Gradle 依赖需要访问 `dl.google.com`、`repo.maven.apache.org` 等仓库；网络受限时可通过
+`GRADLE_ARGS="--init-script <镜像配置>"` 传入仓库镜像。
+
+也可手动构建（使用 Gradle 8.x，而不是仓库 Wrapper）：
+
+```bash
+gradle -p . :app:assembleDebug
 ```
 
 生成的调试 APK 位于：
@@ -120,6 +136,9 @@ scripts/verify-mvp.ps1           # 构建与 APK 权限检查，可选设备验�
 ```text
 app/build/outputs/apk/debug/app-debug.apk
 ```
+
+该 APK 使用本机 Android Debug 证书签名，只用于安装验证，不能作为正式发布版本分发；
+仓库尚未配置正式发布签名。
 
 ### 发布前检查
 
@@ -152,7 +171,7 @@ app/build/outputs/apk/debug/app-debug.apk
 - 至少两家不同厂商 Android 真机的兼容性、预设切换后的预览稳定性、真实云端服务和模型输出仍待验收。
 - 当前取景影调为轻量覆盖提示，保存照片才应用完整配方；第三方应用无法复现各手机厂商私有 ISP 和计算摄影效果。
 - 相机功能取决于设备能力。手动 ISO、快门时间、白平衡、镜头选择及更完整的 Camera2/视频控制尚未接入。
-- 当前仓库仅验证 Debug 构建，没有配置正式发布签名；`v0.1.0` GitHub 预发布未附可供正式分发的 APK。
+- 当前仓库仅验证 Debug 构建，没有配置正式发布签名；`v0.1.0` GitHub 预发布未附可供正式分发的 APK。`scripts/build-apk.sh` 产出的 APK 使用 Android Debug 证书签名，只用于安装测试。
 
 ## 项目文档
 
