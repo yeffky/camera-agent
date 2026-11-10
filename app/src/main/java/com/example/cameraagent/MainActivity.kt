@@ -68,13 +68,24 @@ class MainActivity : ComponentActivity() {
     private lateinit var exposureUpButton: Button
     private lateinit var autoModeButton: Button
     private lateinit var colorStyleButton: Button
-    private lateinit var quickColorButton: Button
+    private lateinit var quickColorButton: TextView
     private lateinit var cameraContent: android.widget.FrameLayout
     private lateinit var pageHost: android.widget.FrameLayout
-    private lateinit var controlsPanel: View
+    private lateinit var cameraTopBar: LinearLayout
+    private lateinit var sceneStatusCard: LinearLayout
+    private lateinit var cameraBottomChrome: LinearLayout
+    private lateinit var bottomBar: LinearLayout
+    private lateinit var navBar: LinearLayout
+    private lateinit var controlsPanel: LinearLayout
+    private lateinit var controlsPanelScroll: ScrollView
     private lateinit var agentCircleButton: View
     private lateinit var shutterButton: View
+    private lateinit var presetStripScroll: HorizontalScrollView
     private lateinit var presetPreviewStrip: LinearLayout
+    private var insetLeft = 0
+    private var insetTop = 0
+    private var insetRight = 0
+    private var insetBottom = 0
     private lateinit var cameraAdvicePanel: LinearLayout
     private lateinit var cameraAdviceText: TextView
     private lateinit var cameraAutoCaptureButton: Button
@@ -144,6 +155,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         cameraExecutor = Executors.newSingleThreadExecutor()
         analysisExecutor = Executors.newSingleThreadExecutor()
         photoProcessingExecutor = Executors.newSingleThreadExecutor()
@@ -177,10 +189,73 @@ class MainActivity : ComponentActivity() {
         super.onStop()
     }
 
+    /** 输入系统栏/刘海安全区，取景画面保持全屏，浮层控件据此让位。 */
+    private fun applySystemBarInsets() {
+        @Suppress("DEPRECATION")
+        window.statusBarColor = Color.TRANSPARENT
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = Color.TRANSPARENT
+        androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(
+            window.decorView,
+        ) { _, insets -> updateSystemBarInsets(insets); insets }
+    }
+
+    private fun updateSystemBarInsets(insets: androidx.core.view.WindowInsetsCompat) {
+        val bars = insets.getInsets(
+            androidx.core.view.WindowInsetsCompat.Type.systemBars() or
+                androidx.core.view.WindowInsetsCompat.Type.displayCutout(),
+        )
+        val changed = bars.left != insetLeft || bars.top != insetTop ||
+            bars.right != insetRight || bars.bottom != insetBottom
+        insetLeft = bars.left
+        insetTop = bars.top
+        insetRight = bars.right
+        insetBottom = bars.bottom
+        if (changed && ::cameraContent.isInitialized) cameraContent.post { applyCameraChromeInsets() }
+    }
+
+    /**
+     * 统一顶栏与底部导航的内边距：顶栏让出状态栏与刘海，导航让出手势条；
+     * 左右两边都留出安全区，保证内容不与挖孔或圆角冲突。
+     */
+    private fun applyCameraChromeInsets() {
+        if (!::cameraContent.isInitialized) return
+        val margin = dp(CameraHomeStyle.SPACING_16)
+        cameraTopBar.setPadding(insetLeft + margin, insetTop + dp(CAMERA_TOP_BAR_TOP_GAP), insetRight + margin, 0)
+        navBar.setPadding(
+            insetLeft + dp(CameraHomeStyle.SPACING_12),
+            dp(6),
+            insetRight + dp(CameraHomeStyle.SPACING_12),
+            insetBottom + dp(6),
+        )
+        bottomBar.setPadding(
+            insetLeft + dp(CameraHomeStyle.SPACING_24),
+            dp(CameraHomeStyle.SPACING_12),
+            insetRight + dp(CameraHomeStyle.SPACING_24),
+            insetBottom + dp(CameraHomeStyle.SPACING_24),
+        )
+        presetStripScroll.setPadding(insetLeft + dp(CameraHomeStyle.SPACING_16), 0, insetRight + dp(CameraHomeStyle.SPACING_16), 0)
+        // 浮层从顶栏下方展开：顶栏上边距 + 顶栏高度 + 间距。
+        val stackTop = insetTop + dp(CAMERA_TOP_BAR_TOP_GAP) + dp(CAMERA_TOOL_BUTTON_SIZE) + dp(CameraHomeStyle.SPACING_12)
+        (cameraAdvicePanel.layoutParams as android.widget.FrameLayout.LayoutParams).apply {
+            topMargin = stackTop
+            cameraAdvicePanel.layoutParams = this
+        }
+        (controlsPanel.layoutParams as android.widget.FrameLayout.LayoutParams).apply {
+            topMargin = stackTop
+            controlsPanel.layoutParams = this
+        }
+    }
+
     private fun createCameraScreen(): View {
+        applySystemBarInsets()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(CameraHomeStyle.CANVAS)
         }
         val contentHost = android.widget.FrameLayout(this)
         root.addView(contentHost, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -197,52 +272,30 @@ class MainActivity : ComponentActivity() {
         cameraContent.addView(previewView, android.widget.FrameLayout.LayoutParams(-1, -1))
         cameraContent.addView(compositionOverlay, android.widget.FrameLayout.LayoutParams(-1, -1))
 
-        // 顶栏容器（Top Bar Container）
-        val topBar = android.widget.FrameLayout(this).apply {
-            setPadding(dp(16), dp(44), dp(16), 0)
+        // 顶栏：左“调控”、中“场景与构图状态”、右“模型设置”，三者同一基线、左右对称。
+        cameraTopBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(8), dp(16), 0)
         }
-
-        // 1. 左上角：调控功能按钮（精美小巧图标按钮）
         val btnControls = android.widget.ImageView(this).apply {
             setImageResource(R.drawable.ic_sliders_control)
-            setBackgroundResource(R.drawable.bg_glass_button)
-            setPadding(dp(10), dp(10), dp(10), dp(10))
+            setBackground(CameraHomeStyle.glassControl(this@MainActivity))
+            setPadding(dp(12), dp(12), dp(12), dp(12))
             contentDescription = "打开相机调控"
             isClickable = true
             isFocusable = true
             setOnClickListener {
-                val expanded = controlsPanel.visibility != View.VISIBLE
-                controlsPanel.visibility = if (expanded) View.VISIBLE else View.GONE
+                controlsPanel.visibility = if (controlsPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
             }
         }
-        topBar.addView(
-            btnControls,
-            android.widget.FrameLayout.LayoutParams(dp(48), dp(48), Gravity.START or Gravity.TOP),
-        )
+        cameraTopBar.addView(btnControls, LinearLayout.LayoutParams(dp(CAMERA_TOOL_BUTTON_SIZE), dp(CAMERA_TOOL_BUTTON_SIZE)))
 
-        // 2. 右上角：Agent 配置栏功能按钮（精美小巧齿轮图标按钮）
-        val btnAgentConfig = android.widget.ImageView(this).apply {
-            setImageResource(R.drawable.ic_settings_gear)
-            setBackgroundResource(R.drawable.bg_glass_button)
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-            contentDescription = "打开模型设置"
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                switchTab("settings")
-            }
-        }
-        topBar.addView(
-            btnAgentConfig,
-            android.widget.FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.TOP),
-        )
-
-        cameraContent.addView(topBar, android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-
-        val sceneStatusCard = LinearLayout(this).apply {
+        sceneStatusCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            setBackgroundResource(R.drawable.bg_glass_card)
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setBackground(CameraHomeStyle.glassCard(this@MainActivity, CameraRadius.PRIMARY))
             contentDescription = "场景与构图状态"
         }
         sceneStatusCard.addView(TextView(this).apply {
@@ -250,37 +303,58 @@ class MainActivity : ComponentActivity() {
             textSize = 9f
             letterSpacing = 0.12f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(183, 204, 239))
+            setTextColor(CameraHomeStyle.FOCUS_ACCENT)
+            gravity = Gravity.CENTER
         })
         statusText = TextView(this).apply {
             text = "正在识别场景"
-            textSize = 11f
-            setTextColor(Color.WHITE)
+            textSize = 12f
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
             maxLines = 2
             ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(0, dp(2), 0, 0)
+            gravity = Gravity.CENTER
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setPadding(0, dp(3), 0, 0)
         }
         sceneStatusCard.addView(statusText, matchWidthWrapHeight())
         captureIntentButton = TextView(this).apply {
             text = "拍摄意图：自动判断  ⌄"
             textSize = 11f
-            setTextColor(Color.rgb(231, 223, 255))
-            setPadding(0, dp(5), 0, 0)
+            setTextColor(CameraHomeStyle.TEXT_SECONDARY)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(6), 0, 0)
             isClickable = true
             isFocusable = true
             contentDescription = "选择拍摄意图"
             setOnClickListener { showCaptureIntentPicker() }
         }
         sceneStatusCard.addView(captureIntentButton, matchWidthWrapHeight())
-        topBar.addView(
+        cameraTopBar.addView(
             sceneStatusCard,
-            android.widget.FrameLayout.LayoutParams(dp(188), -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL),
+            LinearLayout.LayoutParams(0, -2, 1f).apply {
+                leftMargin = dp(12)
+                rightMargin = dp(12)
+            },
         )
+
+        val btnAgentConfig = android.widget.ImageView(this).apply {
+            setImageResource(R.drawable.ic_settings_gear)
+            setBackground(CameraHomeStyle.glassControl(this@MainActivity))
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            contentDescription = "打开模型设置"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                switchTab("settings")
+            }
+        }
+        cameraTopBar.addView(btnAgentConfig, LinearLayout.LayoutParams(dp(CAMERA_TOOL_BUTTON_SIZE), dp(CAMERA_TOOL_BUTTON_SIZE)))
+        cameraContent.addView(cameraTopBar, android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
 
         cameraAdvicePanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            setBackgroundResource(R.drawable.bg_glass_card)
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            setBackground(CameraHomeStyle.glassCard(this@MainActivity))
             visibility = View.GONE
         }
         val adviceTitleRow = LinearLayout(this).apply {
@@ -290,32 +364,32 @@ class MainActivity : ComponentActivity() {
         val adviceIcon = android.widget.ImageView(this).apply {
             setImageResource(R.drawable.ic_agent_sparkle)
             setPadding(dp(3), dp(3), dp(3), dp(3))
-            setColorFilter(Color.rgb(204, 190, 255))
+            setColorFilter(CameraHomeStyle.AI_ACCENT)
         }
         adviceTitleRow.addView(adviceIcon, LinearLayout.LayoutParams(dp(26), dp(26)))
         adviceTitleRow.addView(TextView(this).apply {
             text = "AI 构图建议"
-            textSize = 13f
+            textSize = 14f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
             setPadding(dp(8), 0, 0, 0)
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        adviceTitleRow.addView(android.widget.ImageView(this).apply {
+        val adviceClose = android.widget.ImageView(this).apply {
             setImageResource(R.drawable.ic_close)
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            background = cameraPillBackground(selected = false, accentColor = Color.WHITE)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setBackground(CameraHomeStyle.touchFeedback(this@MainActivity))
             contentDescription = "关闭 AI 建议"
             isClickable = true
             isFocusable = true
             setOnClickListener { showCameraAdvice("", show = false) }
-        }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        }
+        adviceTitleRow.addView(adviceClose, LinearLayout.LayoutParams(dp(CAMERA_TOOL_BUTTON_SIZE), dp(CAMERA_TOOL_BUTTON_SIZE)))
         cameraAdvicePanel.addView(adviceTitleRow)
         cameraAdviceText = TextView(this).apply {
             textSize = 13f
-            setTextColor(Color.WHITE)
-            maxLines = 3
-            setLineSpacing(dp(2).toFloat(), 1f)
-            setPadding(0, dp(4), 0, dp(2))
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            setLineSpacing(dp(3).toFloat(), 1f)
+            setPadding(0, dp(4), 0, dp(12))
         }
         cameraAdvicePanel.addView(cameraAdviceText, matchWidthWrapHeight())
         val adviceActions = LinearLayout(this).apply {
@@ -323,8 +397,9 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         cameraAutoCaptureButton = Button(this).apply {
-            setTextColor(Color.WHITE)
-            setBackgroundResource(R.drawable.bg_glass_button)
+            textSize = 13f
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            setBackground(CameraHomeStyle.glassControl(this@MainActivity, CameraRadius.CONTROL))
             setOnClickListener {
                 if (cloudRequestInFlight) {
                     cancelActiveAgentRequest("已取消分析")
@@ -340,222 +415,70 @@ class MainActivity : ComponentActivity() {
         updateCameraAutoCaptureButton()
         cameraUndoButton = Button(this).apply {
             text = "撤销 AI 调整"
-            setTextColor(Color.WHITE)
-            setBackgroundResource(R.drawable.bg_glass_button)
+            textSize = 13f
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            setBackground(CameraHomeStyle.glassControl(this@MainActivity, CameraRadius.CONTROL))
             visibility = View.GONE
             setOnClickListener { undoLastCloudAdvice() }
         }
-        adviceActions.addView(cameraAutoCaptureButton, LinearLayout.LayoutParams(0, dp(48), 1f).apply {
-            rightMargin = dp(6)
+        adviceActions.addView(cameraAutoCaptureButton, LinearLayout.LayoutParams(0, dp(CAMERA_TOOL_BUTTON_SIZE), 1f).apply {
+            rightMargin = dp(8)
         })
-        adviceActions.addView(cameraUndoButton, LinearLayout.LayoutParams(0, dp(48), 1f))
-        cameraAdvicePanel.addView(adviceActions, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
-        cameraContent.addView(cameraAdvicePanel, android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply {
-            setMargins(dp(16), dp(96), dp(16), 0)
-        })
+        adviceActions.addView(cameraUndoButton, LinearLayout.LayoutParams(0, dp(CAMERA_TOOL_BUTTON_SIZE), 1f))
+        cameraAdvicePanel.addView(adviceActions, matchWidthWrapHeight())
+        cameraAdvicePanel.layoutParams = android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply {
+            setMargins(dp(16), dp(CAMERA_TOP_STACK_FALLBACK), dp(16), 0)
+        }
+        cameraContent.addView(cameraAdvicePanel, cameraAdvicePanel.layoutParams)
 
-        // 4. 左上角浮动“调控面板”（Controls Panel）
+        // 调控面板：从顶栏下方展开的玻璃卡片，内容超出后滚动。
         controlsPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            setBackgroundResource(R.drawable.bg_glass_card)
+            setPadding(0, dp(4), 0, dp(16))
+            setBackground(CameraHomeStyle.glassCard(this@MainActivity))
             visibility = View.GONE
+        }.apply {
+            addView(createControlsPanelHeader(), matchWidthWrapHeight())
+            controlsPanelScroll = ScrollView(this@MainActivity).apply {
+                isVerticalScrollBarEnabled = false
+                overScrollMode = View.OVER_SCROLL_NEVER
+                clipToPadding = false
+                addView(createControlsPanelContent(), android.widget.FrameLayout.LayoutParams(-1, -2))
+            }
+            addView(controlsPanelScroll, LinearLayout.LayoutParams(-1, -2))
         }
+        controlsPanel.layoutParams = android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply {
+            setMargins(dp(16), dp(CAMERA_TOP_STACK_FALLBACK), dp(16), 0)
+        }
+        cameraContent.addView(controlsPanel, controlsPanel.layoutParams)
 
-        val panelTitleRow = LinearLayout(this).apply {
+        // 底部拍摄区：预设条 + 快门行，叠在渐变遮罩上；底部导航固定在最下方。
+        presetStripScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+            setPadding(dp(16), 0, dp(16), 0)
+        }
+        presetPreviewStrip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val panelTitle = TextView(this).apply {
-            text = "相机参数调控"
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-        }
-        val panelClose = android.widget.ImageView(this).apply {
-            setImageResource(R.drawable.ic_close)
-            setPadding(dp(4), dp(4), dp(4), dp(4))
-            setOnClickListener { controlsPanel.visibility = View.GONE }
-        }
-        panelTitleRow.addView(panelTitle, LinearLayout.LayoutParams(0, -2, 1f))
-        panelClose.contentDescription = "关闭相机调控"
-        panelTitleRow.addView(panelClose, LinearLayout.LayoutParams(dp(48), dp(48)))
-        (controlsPanel as LinearLayout).addView(panelTitleRow, matchWidthWrapHeight())
+        presetStripScroll.addView(presetPreviewStrip, android.widget.FrameLayout.LayoutParams(-2, -1))
+        buildPresetPreviewStrip()
 
-        // 变焦 Control
-        val zoomRow = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(12), 0, dp(4))
-        }
-        zoomLabel = TextView(this).apply {
-            text = "变焦 1.0×"
-            setTextColor(Color.WHITE)
-            textSize = 13f
-            minWidth = dp(70)
-        }
-        zoomSeekBar = SeekBar(this).apply {
-            max = 100
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    if (fromUser && !zoomSeekBarUpdating) applyZoomProgress(progress)
-                }
-                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
-            })
-        }
-        zoomRow.addView(zoomLabel)
-        zoomRow.addView(zoomSeekBar, LinearLayout.LayoutParams(0, -2, 1f))
-        (controlsPanel as LinearLayout).addView(zoomRow, matchWidthWrapHeight())
-
-        // 曝光 Control
-        val exposureRow = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, dp(8))
-        }
-        exposureLabel = TextView(this).apply {
-            text = "曝光 0.0 EV"
-            setTextColor(Color.WHITE)
-            textSize = 13f
-            gravity = Gravity.CENTER
-        }
-        exposureDownButton = Button(this).apply {
-            text = "曝光 −"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setBackgroundResource(R.drawable.bg_glass_button)
-            setOnClickListener { adjustExposure(-1) }
-        }
-        exposureUpButton = Button(this).apply {
-            text = "曝光 +"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setBackgroundResource(R.drawable.bg_glass_button)
-            setOnClickListener { adjustExposure(1) }
-        }
-        exposureRow.addView(exposureDownButton, LinearLayout.LayoutParams(0, dp(48), 1f))
-        exposureRow.addView(exposureLabel, LinearLayout.LayoutParams(0, -2, 1.2f))
-        exposureRow.addView(exposureUpButton, LinearLayout.LayoutParams(0, dp(48), 1f))
-        (controlsPanel as LinearLayout).addView(exposureRow, matchWidthWrapHeight())
-
-        // 影调 & 自动模式
-        colorStyleButton = Button(this).apply {
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setBackgroundResource(R.drawable.bg_glass_button)
-            setOnClickListener { cycleColorStyle() }
-        }
-        (controlsPanel as LinearLayout).addView(colorStyleButton, LinearLayout.LayoutParams(-1, dp(48)).apply {
-            topMargin = dp(4)
-        })
-        updateColorStyleButton()
-
-        autoModeButton = Button(this).apply {
-            text = "自动调控：关闭"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setBackgroundResource(R.drawable.bg_glass_button)
-            setOnClickListener { toggleAutoMode() }
-        }
-        (controlsPanel as LinearLayout).addView(autoModeButton, LinearLayout.LayoutParams(-1, dp(48)).apply {
-            topMargin = dp(6)
-        })
-
-        val guideButton = Button(this).apply {
-            text = "切换构图辅助线"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setBackgroundResource(R.drawable.bg_glass_button)
-            setOnClickListener {
-                guideEnabled = !guideEnabled
-                compositionOverlay.visibility = if (guideEnabled) View.VISIBLE else View.GONE
-                showStatus(if (guideEnabled) "构图辅助线已开启" else "构图辅助线已关闭")
-            }
-        }
-        (controlsPanel as LinearLayout).addView(guideButton, LinearLayout.LayoutParams(-1, dp(48)).apply {
-            topMargin = dp(6)
-        })
-
-        val capabilityButton = Button(this).apply {
-            text = "设备能力报告"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setBackgroundResource(R.drawable.bg_glass_button)
-            setOnClickListener { showCapabilityReport() }
-        }
-        (controlsPanel as LinearLayout).addView(capabilityButton, LinearLayout.LayoutParams(-1, dp(48)).apply {
-            topMargin = dp(6)
-        })
-
-        cameraContent.addView(
-            controlsPanel,
-            android.widget.FrameLayout.LayoutParams(dp(280), -2, Gravity.TOP or Gravity.START).apply {
-                setMargins(dp(16), dp(96), 0, 0)
-            },
-        )
-
-        // 5. 底部操作栏（Bottom Control Area）
-        val bottomBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(dp(24), dp(10), dp(24), dp(18))
-        }
-
-        // 快速切影调小按钮
-        quickColorButton = Button(this).apply {
-            text = "自然"
-            textSize = 11f
-            setTextColor(Color.WHITE)
-            setBackground(cameraPillBackground(selected = true, accentColor = Color.rgb(183, 204, 239)))
-            maxLines = 2
-            gravity = Gravity.CENTER
-            contentDescription = "当前风格，点按切换预设"
-            setOnClickListener { cycleColorStyle() }
-        }
-        bottomBar.addView(quickColorButton, LinearLayout.LayoutParams(dp(82), dp(52)).apply {
-            rightMargin = dp(18)
-        })
-        updateColorStyleButton()
-
-        // 主拍摄按钮（大圆形）
-        shutterButton = View(this).apply {
-            setBackgroundResource(R.drawable.bg_shutter_outer)
-            setOnClickListener { takePhoto() }
-        }
-        bottomBar.addView(shutterButton, LinearLayout.LayoutParams(dp(72), dp(72)))
-
-        // Agent 功能圆形按钮（与拍摄按钮并排）
-        agentCircleButton = android.widget.FrameLayout(this).apply {
-            setBackgroundResource(R.drawable.bg_agent_circle)
-            contentDescription = "AI 拍摄建议"
-            val icon = android.widget.ImageView(context).apply {
-                setImageResource(R.drawable.ic_agent_sparkle)
-                setPadding(dp(12), dp(12), dp(12), dp(12))
-            }
-            addView(icon, android.widget.FrameLayout.LayoutParams(-1, -1))
-            setOnClickListener {
-                sendCloudRequest()
-            }
-        }
-        bottomBar.addView(agentCircleButton, LinearLayout.LayoutParams(dp(60), dp(60)).apply {
-            leftMargin = dp(18)
-        })
-
-        val bottomControls = LinearLayout(this).apply {
+        bottomBar = createBottomControlBar() as LinearLayout
+        cameraBottomChrome = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = android.graphics.drawable.GradientDrawable().apply {
-                orientation = android.graphics.drawable.GradientDrawable.Orientation.BOTTOM_TOP
-                colors = intArrayOf(0xdd000000.toInt(), 0x00000000)
-            }
+            background = CameraHomeStyle.bottomScrim()
         }
-        bottomControls.addView(createPresetPreviewStrip(), LinearLayout.LayoutParams(-1, dp(52)))
-        bottomControls.addView(bottomBar, LinearLayout.LayoutParams(-1, -2))
-        cameraContent.addView(bottomControls, android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        cameraBottomChrome.addView(presetStripScroll, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(16) })
+        cameraBottomChrome.addView(bottomBar, LinearLayout.LayoutParams(-1, -2))
+        cameraContent.addView(cameraBottomChrome, android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
 
-        val tabBar = LinearLayout(this).apply {
+        navBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(dp(10), dp(5), dp(10), dp(5))
-            setBackgroundColor(Color.rgb(13, 16, 22))
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            setBackgroundColor(CameraHomeStyle.CANVAS)
         }
         listOf(
             Triple("home", "主界面", R.drawable.ic_nav_camera),
@@ -564,7 +487,7 @@ class MainActivity : ComponentActivity() {
         ).forEach { (tab, label, iconResource) ->
             val icon = android.widget.ImageView(this).apply {
                 setImageResource(iconResource)
-                layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
+                layoutParams = LinearLayout.LayoutParams(dp(22), dp(22))
             }
             val title = TextView(this).apply {
                 text = label
@@ -590,16 +513,201 @@ class MainActivity : ComponentActivity() {
             navTabViews[tab] = tabButton
             navTabIconViews[tab] = icon
             tabButton.tag = title
-            tabBar.addView(tabButton, LinearLayout.LayoutParams(0, dp(54), 1f).apply {
-                leftMargin = dp(4)
-                rightMargin = dp(4)
-            })
+            navBar.addView(tabButton, LinearLayout.LayoutParams(0, dp(CAMERA_NAV_ITEM_HEIGHT), 1f))
         }
-        root.addView(tabBar, LinearLayout.LayoutParams(-1, dp(64)))
+        root.addView(navBar, LinearLayout.LayoutParams(-1, -2))
         updateNavTabAppearance()
 
         return root
     }
+
+    private fun createControlsPanelHeader(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(16), dp(6), dp(8), dp(6))
+        addView(TextView(this@MainActivity).apply {
+            text = "相机参数"
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            textSize = 15f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        addView(android.widget.ImageView(this@MainActivity).apply {
+            setImageResource(R.drawable.ic_close)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setBackground(CameraHomeStyle.touchFeedback(this@MainActivity))
+            contentDescription = "关闭相机调控"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { controlsPanel.visibility = View.GONE }
+        }, LinearLayout.LayoutParams(dp(CAMERA_TOOL_BUTTON_SIZE), dp(CAMERA_TOOL_BUTTON_SIZE)))
+    }
+
+    private fun createControlsPanelContent(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), 0, dp(16), 0)
+
+        addView(cameraSectionLabel("变焦"))
+        zoomLabel = TextView(this@MainActivity).apply {
+            text = "1.0×"
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            textSize = 13f
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            maxLines = 1
+        }
+        zoomSeekBar = SeekBar(this@MainActivity).apply {
+            max = 100
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    if (fromUser && !zoomSeekBarUpdating) applyZoomProgress(progress)
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            })
+        }
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(zoomSeekBar, LinearLayout.LayoutParams(0, dp(CAMERA_SEEKBAR_HEIGHT), 1f))
+            addView(zoomLabel, LinearLayout.LayoutParams(dp(64), -2).apply { leftMargin = dp(8) })
+        }, matchWidthWrapHeight())
+
+        addView(cameraSectionLabel("曝光补偿"))
+        exposureLabel = TextView(this@MainActivity).apply {
+            text = "0.0 EV"
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            textSize = 14f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        exposureDownButton = Button(this@MainActivity).apply {
+            text = "−"
+            textSize = 18f
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            setBackground(CameraHomeStyle.glassControl(this@MainActivity, CameraRadius.CONTROL))
+            contentDescription = "降低曝光"
+            setOnClickListener { adjustExposure(-1) }
+        }
+        exposureUpButton = Button(this@MainActivity).apply {
+            text = "+"
+            textSize = 18f
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            setBackground(CameraHomeStyle.glassControl(this@MainActivity, CameraRadius.CONTROL))
+            contentDescription = "提高曝光"
+            setOnClickListener { adjustExposure(1) }
+        }
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(exposureDownButton, LinearLayout.LayoutParams(dp(CAMERA_EXPOSURE_BUTTON_WIDTH), dp(CAMERA_TOOL_BUTTON_SIZE)))
+            addView(exposureLabel, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(exposureUpButton, LinearLayout.LayoutParams(dp(CAMERA_EXPOSURE_BUTTON_WIDTH), dp(CAMERA_TOOL_BUTTON_SIZE)))
+        }, matchWidthWrapHeight())
+
+        addView(cameraSectionLabel("影调"))
+        colorStyleButton = Button(this@MainActivity).apply {
+            textSize = 13f
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            setBackground(CameraHomeStyle.glassControl(this@MainActivity, CameraRadius.CONTROL))
+            setOnClickListener { cycleColorStyle() }
+        }
+        addView(colorStyleButton, LinearLayout.LayoutParams(-1, dp(CAMERA_TOOL_BUTTON_SIZE)))
+        updateColorStyleButton()
+
+        addView(cameraSectionLabel("拍摄辅助"))
+        autoModeButton = Button(this@MainActivity).apply {
+            textSize = 13f
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            setBackground(CameraHomeStyle.glassControl(this@MainActivity, CameraRadius.CONTROL))
+            setOnClickListener { toggleAutoMode() }
+        }
+        val guideButton = Button(this@MainActivity).apply {
+            text = "切换构图辅助线"
+            textSize = 13f
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            setBackground(CameraHomeStyle.glassControl(this@MainActivity, CameraRadius.CONTROL))
+            setOnClickListener {
+                guideEnabled = !guideEnabled
+                compositionOverlay.visibility = if (guideEnabled) View.VISIBLE else View.GONE
+                showStatus(if (guideEnabled) "构图辅助线已开启" else "构图辅助线已关闭")
+            }
+        }
+        val capabilityButton = Button(this@MainActivity).apply {
+            text = "设备能力报告"
+            textSize = 13f
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            setBackground(CameraHomeStyle.glassControl(this@MainActivity, CameraRadius.CONTROL))
+            setOnClickListener { showCapabilityReport() }
+        }
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(autoModeButton, LinearLayout.LayoutParams(0, dp(CAMERA_TOOL_BUTTON_SIZE), 1f).apply { rightMargin = dp(8) })
+            addView(guideButton, LinearLayout.LayoutParams(0, dp(CAMERA_TOOL_BUTTON_SIZE), 1f))
+        }, matchWidthWrapHeight())
+        addView(capabilityButton, LinearLayout.LayoutParams(-1, dp(CAMERA_TOOL_BUTTON_SIZE)).apply { topMargin = dp(8) })
+    }
+
+    private fun cameraSectionLabel(text: String): View = TextView(this).apply {
+        this.text = text
+        textSize = 11f
+        letterSpacing = 0.06f
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+        setTextColor(CameraHomeStyle.TEXT_TERTIARY)
+        setPadding(0, dp(14), 0, dp(6))
+    }
+
+    /**
+     * 底部快门行：快门位于正中，左侧当前影调、右侧 AI 拍摄入口以同尺寸圆形按钮对称放置，
+     * 三者中线分别对齐屏幕中线与两侧对称位置，便于单手拇指触及。
+     */
+    private fun createBottomControlBar(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        setPadding(dp(24), dp(12), dp(24), dp(24))
+
+        quickColorButton = TextView(this@MainActivity).apply {
+            text = "自然"
+            textSize = 12f
+            setTextColor(CameraHomeStyle.TEXT_PRIMARY)
+            gravity = Gravity.CENTER
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = CameraHomeStyle.presetPillStateful(this@MainActivity, selected = true, accentColor = CameraHomeStyle.FOCUS_ACCENT)
+            contentDescription = "当前风格，点按切换预设"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { cycleColorStyle() }
+        }
+        addView(quickColorButton, LinearLayout.LayoutParams(dp(CAMERA_SIDE_BUTTON_WIDTH), dp(CAMERA_SIDE_BUTTON_WIDTH)))
+
+        shutterButton = View(this@MainActivity).apply {
+            setBackgroundResource(R.drawable.bg_shutter_outer)
+            contentDescription = "拍照"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { takePhoto() }
+        }
+        // 快门左右对称留白：快门中线位于屏幕中线，两侧按钮中线与画面中线等距。
+        addView(shutterButton, LinearLayout.LayoutParams(dp(CAMERA_SHUTTER_SIZE), dp(CAMERA_SHUTTER_SIZE)).apply {
+            rightMargin = dp(CAMERA_SHUTTER_SIDE_GAP * 2)
+        })
+
+        agentCircleButton = android.widget.FrameLayout(this@MainActivity).apply {
+            setBackground(CameraHomeStyle.circle(CameraHomeStyle.AI_TILE, CameraHomeStyle.withAlpha(CameraHomeStyle.AI_ACCENT, 0x66), 1, this@MainActivity))
+            contentDescription = "AI 拍摄建议"
+            isClickable = true
+            isFocusable = true
+            addView(android.widget.ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_agent_sparkle)
+                setPadding(dp(14), dp(14), dp(14), dp(14))
+            }, android.widget.FrameLayout.LayoutParams(-1, -1))
+            setOnClickListener {
+                sendCloudRequest()
+            }
+        }
+        addView(agentCircleButton, LinearLayout.LayoutParams(dp(CAMERA_SIDE_BUTTON_WIDTH), dp(CAMERA_SIDE_BUTTON_WIDTH)))
+    }
+
 
     private fun switchTab(tab: String) {
         if (tab !in setOf("home", "presets", "settings")) return
@@ -688,14 +796,10 @@ class MainActivity : ComponentActivity() {
         navTabViews.forEach { (tab, view) ->
             val selected = tab == activeTab
             val title = view.tag as? TextView
-            val color = if (selected) Color.rgb(213, 228, 255) else Color.rgb(164, 171, 183)
-            view.background = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-                cornerRadius = dp(18).toFloat()
-                setColor(if (selected) Color.rgb(39, 49, 67) else Color.TRANSPARENT)
-            }
+            val color = if (selected) CameraHomeStyle.FOCUS_ACCENT else CameraHomeStyle.TEXT_SECONDARY
+            view.background = CameraHomeStyle.navPill(selected)
             view.isSelected = selected
-            title?.setTextColor(if (selected) Color.WHITE else Color.rgb(164, 171, 183))
+            title?.setTextColor(if (selected) CameraHomeStyle.TEXT_PRIMARY else CameraHomeStyle.TEXT_SECONDARY)
             navTabIconViews[tab]?.setColorFilter(color)
         }
     }
@@ -896,7 +1000,7 @@ class MainActivity : ComponentActivity() {
                 selectedPresetAmount,
                 recipe,
             )
-            rebuildPresetPreviewStrip()
+            buildPresetPreviewStrip()
             selectPreset(preset.id)
             dialog.dismiss()
         }
@@ -911,7 +1015,7 @@ class MainActivity : ComponentActivity() {
                     android.app.AlertDialog.Builder(this).setTitle("重命名预设").setView(input)
                         .setPositiveButton("保存") { _, _ ->
                             photoPresetStore.renameCustomPreset(preset.id, input.text.toString())
-                            rebuildPresetPreviewStrip()
+                            buildPresetPreviewStrip()
                             switchTab("presets")
                         }.setNegativeButton("取消", null).show()
                 } else {
@@ -925,7 +1029,7 @@ class MainActivity : ComponentActivity() {
                                 selectedPresetAmount = photoPresetStore.amount("natural")
                                 manualColorOverride = false
                             }
-                            rebuildPresetPreviewStrip()
+                            buildPresetPreviewStrip()
                             switchTab("presets")
                         }.setNegativeButton("取消", null).show()
                 }
@@ -944,7 +1048,7 @@ class MainActivity : ComponentActivity() {
         photoPresetStore.markRecent(id)
         manualColorOverride = true
         updateColorStyleButton()
-        rebuildPresetPreviewStrip()
+        buildPresetPreviewStrip()
         latestAssessment?.let { compositionOverlay.updateAssessment(it, selectedColorStyle) }
         if (navigateToPresets) switchTab("presets")
     }
@@ -1987,7 +2091,7 @@ class MainActivity : ComponentActivity() {
         zoomSeekBarUpdating = false
         zoomSeekBar.isEnabled = zoomSupported
         zoomLabel.text = if (zoomSupported) {
-            "变焦 ${"%.1f".format(Locale.US, zoomState.zoomRatio)}×"
+            "${"%.1f".format(Locale.US, zoomState.zoomRatio)}×"
         } else {
             "此镜头不支持变焦"
         }
@@ -2099,7 +2203,8 @@ class MainActivity : ComponentActivity() {
             quickColorButton.isEnabled = !autoModeEnabled
             quickColorButton.text = selectedPresetName
             quickColorButton.contentDescription = "当前风格：$selectedPresetName，点按切换预设"
-            quickColorButton.background = cameraPillBackground(
+            quickColorButton.background = CameraHomeStyle.presetPillStateful(
+                this,
                 selected = true,
                 accentColor = presetAccentColor(photoPresetStore.find(selectedPresetId)),
             )
@@ -2120,22 +2225,7 @@ class MainActivity : ComponentActivity() {
         updatePresetPreviewStripSelection()
     }
 
-    private fun createPresetPreviewStrip(): View {
-        val scroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            clipToPadding = false
-            setPadding(dp(14), 0, dp(14), 0)
-        }
-        presetPreviewStrip = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        scroll.addView(presetPreviewStrip, android.widget.FrameLayout.LayoutParams(-2, -1))
-        rebuildPresetPreviewStrip()
-        return scroll
-    }
-
-    private fun rebuildPresetPreviewStrip() {
+    private fun buildPresetPreviewStrip() {
         if (!::presetPreviewStrip.isInitialized) return
         presetPreviewStrip.removeAllViews()
         photoPresetStore.allPresets().forEach { preset ->
@@ -2144,7 +2234,7 @@ class MainActivity : ComponentActivity() {
                 text = preset.name
                 textSize = 11f
                 gravity = Gravity.CENTER_VERTICAL
-                setTextColor(Color.rgb(232, 235, 241))
+                setTextColor(CameraHomeStyle.TEXT_SECONDARY)
                 setPadding(dp(7), 0, 0, 0)
                 maxLines = 1
             }
@@ -2152,8 +2242,8 @@ class MainActivity : ComponentActivity() {
                 tag = preset.id
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
-                setPadding(dp(11), dp(6), dp(13), dp(6))
-                background = cameraPillBackground(preset.id == selectedPresetId, accentColor)
+                setPadding(dp(12), dp(6), dp(14), dp(6))
+                background = CameraHomeStyle.presetPillStateful(this@MainActivity, preset.id == selectedPresetId, accentColor)
                 contentDescription = "预览${preset.name}预设"
                 isClickable = true
                 isFocusable = true
@@ -2170,8 +2260,10 @@ class MainActivity : ComponentActivity() {
                     animatePresetSelection()
                 }
             }
-            presetPreviewStrip.addView(chip, LinearLayout.LayoutParams(-2, dp(48)).apply {
+            presetPreviewStrip.addView(chip, LinearLayout.LayoutParams(-2, dp(40)).apply {
                 rightMargin = dp(8)
+                topMargin = dp(4)
+                bottomMargin = dp(4)
             })
         }
         updatePresetPreviewStripSelection()
@@ -2185,9 +2277,9 @@ class MainActivity : ComponentActivity() {
             val preset = photoPresetStore.find(chip.tag as? String ?: "")
             val accentColor = presetAccentColor(preset)
             chip.isSelected = selected
-            chip.background = cameraPillBackground(selected, accentColor)
+            chip.background = CameraHomeStyle.presetPillStateful(this, selected, accentColor)
             (chip.getChildAt(1) as? TextView)?.setTextColor(
-                if (selected) Color.WHITE else Color.rgb(205, 211, 221),
+                if (selected) CameraHomeStyle.TEXT_PRIMARY else CameraHomeStyle.TEXT_SECONDARY,
             )
         }
     }
@@ -2201,19 +2293,6 @@ class MainActivity : ComponentActivity() {
         ColorStyle.MONOCHROME -> Color.rgb(210, 216, 224)
         else -> Color.rgb(183, 204, 239)
     }
-
-    private fun cameraPillBackground(selected: Boolean, accentColor: Int): android.graphics.drawable.Drawable =
-        android.graphics.drawable.GradientDrawable().apply {
-            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-            cornerRadius = dp(18).toFloat()
-            setColor(if (selected) Color.rgb(39, 49, 67) else Color.argb(174, 12, 16, 24))
-            val strokeColor = if (selected) {
-                Color.argb(150, Color.red(accentColor), Color.green(accentColor), Color.blue(accentColor))
-            } else {
-                Color.argb(74, 255, 255, 255)
-            }
-            setStroke(dp(1), strokeColor)
-        }
 
     private fun updateCameraAutoCaptureButton() {
         if (::cameraAutoCaptureButton.isInitialized) {
@@ -2232,11 +2311,35 @@ class MainActivity : ComponentActivity() {
             return
         }
         cameraAdviceText.text = message
+        cameraAdviceText.maxLines = Int.MAX_VALUE
+        cameraAdvicePanel.post {
+            if (!::cameraAdvicePanel.isInitialized) return@post
+            val maxLines = adviceMaxLines()
+            if (cameraAdviceText.lineCount > maxLines) {
+                cameraAdviceText.maxLines = maxLines
+                cameraAdviceText.ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+        }
         if (cameraAdvicePanel.visibility != View.VISIBLE) {
             cameraAdvicePanel.alpha = 0f
             cameraAdvicePanel.visibility = View.VISIBLE
             cameraAdvicePanel.animate().alpha(1f).setDuration(CAMERA_ADVICE_FADE_DURATION_MS).start()
         }
+    }
+
+    /**
+     * 建议卡正文最多显示行数：可用高度 = 底栏上沿 − 建议卡顶部 − 卡头/按钮区高度；
+     * 超出时截断正文而不是把操作按钮挤出屏幕。
+     */
+    private fun adviceMaxLines(): Int {
+        val chromeTop = cameraBottomChrome.top
+        if (chromeTop <= 0) return CAMERA_ADVICE_FALLBACK_LINES
+        val panelTop = cameraAdvicePanel.top
+        val reserved = dp(CAMERA_ADVICE_RESERVED_HEIGHT)
+        val available = (chromeTop - panelTop - reserved).coerceAtLeast(0)
+        val lineHeight = CameraHomeStyle.lineHeightOf(cameraAdviceText)
+        if (lineHeight <= 0) return CAMERA_ADVICE_FALLBACK_LINES
+        return (available / lineHeight).coerceIn(1, CAMERA_ADVICE_MAX_LINES)
     }
 
     private fun animatePresetSelection() {
@@ -2384,7 +2487,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         val ev = state.exposureCompensationIndex * state.exposureCompensationStep.toFloat()
-        exposureLabel.text = "曝光 ${if (ev > 0) "+" else ""}${"%.1f".format(Locale.US, ev)} EV"
+        exposureLabel.text = "${if (ev > 0) "+" else ""}${"%.1f".format(Locale.US, ev)} EV"
     }
 
     private fun takePhoto(cropRect: NormalizedCropRect? = activeAiCropRect) {
@@ -2771,6 +2874,23 @@ class MainActivity : ComponentActivity() {
         const val KEY_AUTO_CAPTURE_AFTER_AI = "auto_capture_after_ai"
         const val AUTO_CAPTURE_PREVIEW_DELAY_MS = 420L
         const val CAMERA_ADVICE_FADE_DURATION_MS = 160L
+        const val CAMERA_TOOL_BUTTON_SIZE = CameraHomeStyle.MIN_TOUCH_TARGET
+        const val CAMERA_TOP_BAR_TOP_GAP = 8
+        /** 浮层在系统栏回调到达前的初始偏移：状态栏约 24dp + 顶栏间距 + 顶栏高度 + 层间距。 */
+        const val CAMERA_TOP_STACK_FALLBACK = 92
+        const val CAMERA_SHUTTER_SIZE = 72
+        /** 快门外环视觉厚度（与 bg_shutter_outer 的圆心比例一致）。 */
+        const val CAMERA_SHUTTER_RING_GAP = 4
+        const val CAMERA_SIDE_BUTTON_WIDTH = 64
+        /** 快门中线与两侧控件中线的水平距离：快门半径 + 间距 + 两侧控件半径。 */
+        const val CAMERA_SHUTTER_SIDE_GAP = 12
+        const val CAMERA_EXPOSURE_BUTTON_WIDTH = 56
+        const val CAMERA_SEEKBAR_HEIGHT = 40
+        const val CAMERA_NAV_ITEM_HEIGHT = 52
+        /** 建议卡可显示正文的最大行数，以及卡片头部与操作按钮占用的高度。 */
+        const val CAMERA_ADVICE_MAX_LINES = 8
+        const val CAMERA_ADVICE_FALLBACK_LINES = 3
+        const val CAMERA_ADVICE_RESERVED_HEIGHT = 150
         const val PREVIEW_EDIT_DEBOUNCE_MS = 140L
     }
 }
