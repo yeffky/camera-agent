@@ -7,7 +7,7 @@
 |---|---|---|
 | `shutter-before-device.png` | 修改前：`main` 49ad844 | 原圆形 72dp 快门，外框为 oval 形状的 4dp 白描边 |
 | `shutter-after-device.png` | 修改后：本 PR `ec0cc05` | 方形 72dp 快门，24dp 圆角，外框仍为 4dp 白描边 |
-| `shutter-side-by-side.png` | 两张原始截图底部拍摄区裁切并 2 倍放大后并排 | 左=修改前，右=修改后 |
+| `shutter-side-by-side.png` | 两张原始截图同一区域（x 300-860，y 1960-2240）裁切后 3 倍放大并排 | 左=修改前（圆形），右=修改后（方形，24dp 圆角） |
 
 测量（像素坐标，密度 2.625，取自上述原始截图）：
 
