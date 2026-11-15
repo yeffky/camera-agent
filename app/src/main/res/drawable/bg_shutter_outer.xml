@@ -1,7 +1,9 @@
 <ripple xmlns:android="http://schemas.android.com/apk/res/android"
     android:color="#40FFFFFF">
     <item>
-        <shape android:shape="oval">
+        <!-- 方形快门：直角用视觉令牌里的最大圆角 24dp，外框仍是 4dp 白环 -->
+        <shape android:shape="rectangle">
+            <corners android:radius="24dp" />
             <solid android:color="#22FFFFFF" />
             <stroke
                 android:width="4dp"

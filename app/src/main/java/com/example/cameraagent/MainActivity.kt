@@ -516,7 +516,7 @@ class MainActivity : ComponentActivity() {
         })
         updateColorStyleButton()
 
-        // 主拍摄按钮（大圆形）
+        // 主拍摄按钮（方形，24dp 圆角）
         shutterButton = View(this).apply {
             setBackgroundResource(R.drawable.bg_shutter_outer)
             setOnClickListener { takePhoto() }
