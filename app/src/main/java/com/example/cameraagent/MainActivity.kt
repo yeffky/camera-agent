@@ -288,7 +288,7 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val adviceIcon = android.widget.ImageView(this).apply {
-            setImageResource(R.drawable.ic_agent_sparkle)
+            setImageResource(R.drawable.ic_agent_moon)
             setPadding(dp(3), dp(3), dp(3), dp(3))
             setColorFilter(Color.rgb(204, 190, 255))
         }
@@ -528,7 +528,7 @@ class MainActivity : ComponentActivity() {
             setBackgroundResource(R.drawable.bg_agent_circle)
             contentDescription = "AI 拍摄建议"
             val icon = android.widget.ImageView(context).apply {
-                setImageResource(R.drawable.ic_agent_sparkle)
+                setImageResource(R.drawable.ic_agent_moon)
                 setPadding(dp(12), dp(12), dp(12), dp(12))
             }
             addView(icon, android.widget.FrameLayout.LayoutParams(-1, -1))
